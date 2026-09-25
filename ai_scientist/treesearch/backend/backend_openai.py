@@ -18,11 +18,17 @@ OPENAI_TIMEOUT_EXCEPTIONS = (
     openai.InternalServerError,
 )
 
+# NII RDC: thinking モデルは生成が長く、既定タイムアウトだと backoff を誘発する。
+# LLMJP_TIMEOUT(秒)で延ばす(改版提案 §12.2 の onprem 運用)。
+_LLMJP_TIMEOUT = float(os.environ.get("LLMJP_TIMEOUT", "1800"))
+
+
 def get_ai_client(model: str, max_retries=2) -> openai.OpenAI:
     if model.startswith("ollama/"):
         client = openai.OpenAI(
             base_url="http://localhost:11434/v1",
-            max_retries=max_retries
+            max_retries=max_retries,
+            timeout=_LLMJP_TIMEOUT,
         )
     elif model.startswith("llmjp/"):
         # NII RDC: onprem llm-jp (vLLM, OpenAI 互換)。tree-search コーダーを外部でなく
@@ -31,9 +37,12 @@ def get_ai_client(model: str, max_retries=2) -> openai.OpenAI:
             base_url=os.environ.get("LLMJP_BASE_URL", "http://localhost:8001/v1"),
             api_key=os.environ.get("LLMJP_API_KEY", "EMPTY"),
             max_retries=max_retries,
+            timeout=_LLMJP_TIMEOUT,
         )
     else:
-        client = openai.OpenAI(max_retries=max_retries)
+        # 既定(gpt-4o 等のハードコード呼び出し)。OPENAI_BASE_URL を llm-jp に向ければ
+        # ここも onprem に着地する(vLLM 側で gpt-4o 別名を served-model-name に足す)。
+        client = openai.OpenAI(max_retries=max_retries, timeout=_LLMJP_TIMEOUT)
     return client
 
 
