@@ -48,10 +48,30 @@ def query(
 
     messages = opt_messages_to_list(system_message, user_message)
 
-    if func_spec is not None:
+    # NII RDC: llm-jp は OpenAI の forced tool_choice(function-calling)に未対応
+    # (独自 Harmony 形式で、vLLM の gpt-oss 用 openai parser とも不整合)。func_spec が
+    # あるときは tools を送らず、スキーマをプロンプトに載せて JSON で答えさせ、本文から
+    # JSON を抽出する(改版提案 §12.2 の onprem 運用。tool-calling の成熟度に依存しない)。
+    llmjp_fallback = (
+        filtered_kwargs.get("model", "").startswith("llmjp/") and func_spec is not None
+    )
+
+    if func_spec is not None and not llmjp_fallback:
         filtered_kwargs["tools"] = [func_spec.as_openai_tool_dict]
         # force the model to use the function
         filtered_kwargs["tool_choice"] = func_spec.openai_tool_choice_dict
+
+    if llmjp_fallback:
+        schema_txt = json.dumps(func_spec.json_schema, ensure_ascii=False)
+        instruct = (
+            f"\n\nCall the function `{func_spec.name}`: {func_spec.description}\n"
+            "Respond with ONLY a single JSON object that matches this JSON schema "
+            f"(no prose, no code fence):\n{schema_txt}"
+        )
+        if messages and messages[-1].get("role") == "user":
+            messages[-1]["content"] = (messages[-1].get("content") or "") + instruct
+        else:
+            messages.append({"role": "user", "content": instruct})
 
     if filtered_kwargs.get("model", "").startswith(("ollama/", "llmjp/")):
        filtered_kwargs["model"] = filtered_kwargs["model"].split("/", 1)[1]
@@ -69,6 +89,19 @@ def query(
 
     if func_spec is None:
         output = choice.message.content
+    elif llmjp_fallback:
+        # 本文から JSON を抽出(thinking モデルは llmjp4 parser で reasoning が分離され、
+        # content は答えになる)。抽出できなければ素の json.loads を試す。
+        from ai_scientist.llm import extract_json_between_markers
+
+        content = choice.message.content or ""
+        output = extract_json_between_markers(content)
+        if output is None:
+            try:
+                output = json.loads(content.strip())
+            except json.JSONDecodeError as e:
+                logger.error(f"llm-jp fallback: JSON を抽出できませんでした: {content[:500]}")
+                raise e
     else:
         assert (
             choice.message.tool_calls
