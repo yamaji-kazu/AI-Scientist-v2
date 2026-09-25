@@ -11,6 +11,13 @@ import openai
 MAX_NUM_TOKENS = 4096
 
 AVAILABLE_LLMS = [
+    # NII RDC: onprem llm-jp via vLLM (OpenAI-compatible). 改版提案 §12.2 のデータフロー既定
+    # (未公開の題目・計画・仮説を外部に出さない)。base_url は LLMJP_BASE_URL で差し替える。
+    # 形式は "llmjp/" + vLLM の served-model-name。実機の id は "llm-jp/llm-jp-4-8b-thinking"
+    # (スラッシュ入り) なので、先頭の "llmjp/" だけ剥がして残りをそのまま vLLM に渡す
+    # (dispatch は model.split("/", 1)[1])。thinking モデルは reasoning を先に出すため、
+    # content を取り切れるよう MAX_NUM_TOKENS に余裕を持たせる。
+    "llmjp/llm-jp/llm-jp-4-8b-thinking",
     "claude-3-5-sonnet-20240620",
     "claude-3-5-sonnet-20241022",
     # OpenAI models
@@ -98,10 +105,10 @@ def get_batch_responses_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if model.startswith("ollama/"):
+    if model.startswith("ollama/") or model.startswith("llmjp/"):
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model=model.replace("ollama/", ""),
+            model=model.split("/", 1)[1],
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
@@ -214,9 +221,9 @@ def get_batch_responses_from_llm(
 
 @track_token_usage
 def make_llm_call(client, model, temperature, system_message, prompt):
-    if model.startswith("ollama/"):
+    if model.startswith("ollama/") or model.startswith("llmjp/"):
         return client.chat.completions.create(
-            model=model.replace("ollama/", ""),
+            model=model.split("/", 1)[1],
             messages=[
                 {"role": "system", "content": system_message},
                 *prompt,
@@ -309,10 +316,10 @@ def get_response_from_llm(
                 ],
             }
         ]
-    elif model.startswith("ollama/"):
+    elif model.startswith("ollama/") or model.startswith("llmjp/"):
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model=model.replace("ollama/", ""),
+            model=model.split("/", 1)[1],
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
@@ -494,6 +501,15 @@ def create_client(model) -> tuple[Any, str]:
         return openai.OpenAI(
             api_key=os.environ.get("OLLAMA_API_KEY", ""),
             base_url="http://localhost:11434/v1",
+        ), model
+    elif model.startswith("llmjp/"):
+        # NII RDC: onprem llm-jp via vLLM (OpenAI-compatible)。改版提案 §12.2 のデータフロー既定。
+        # 既定 base_url は 111 の vLLM (127.0.0.1:8001)。別ホストからは LLMJP_BASE_URL で差し替える。
+        # vLLM は API キーを検証しないので既定は "EMPTY"。
+        print(f"Using onprem llm-jp (vLLM) with model {model}.")
+        return openai.OpenAI(
+            api_key=os.environ.get("LLMJP_API_KEY", "EMPTY"),
+            base_url=os.environ.get("LLMJP_BASE_URL", "http://localhost:8001/v1"),
         ), model
     elif "gpt" in model:
         print(f"Using OpenAI API with model {model}.")
