@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 
 from .utils import FunctionSpec, OutputType, opt_messages_to_list, backoff_create
@@ -20,8 +21,16 @@ OPENAI_TIMEOUT_EXCEPTIONS = (
 def get_ai_client(model: str, max_retries=2) -> openai.OpenAI:
     if model.startswith("ollama/"):
         client = openai.OpenAI(
-            base_url="http://localhost:11434/v1", 
+            base_url="http://localhost:11434/v1",
             max_retries=max_retries
+        )
+    elif model.startswith("llmjp/"):
+        # NII RDC: onprem llm-jp (vLLM, OpenAI 互換)。tree-search コーダーを外部でなく
+        # llm-jp に向ける(改版提案 §12.2)。llm.py の llmjp/ 分岐と対称。
+        client = openai.OpenAI(
+            base_url=os.environ.get("LLMJP_BASE_URL", "http://localhost:8001/v1"),
+            api_key=os.environ.get("LLMJP_API_KEY", "EMPTY"),
+            max_retries=max_retries,
         )
     else:
         client = openai.OpenAI(max_retries=max_retries)
@@ -44,8 +53,8 @@ def query(
         # force the model to use the function
         filtered_kwargs["tool_choice"] = func_spec.openai_tool_choice_dict
 
-    if filtered_kwargs.get("model", "").startswith("ollama/"):
-       filtered_kwargs["model"] = filtered_kwargs["model"].replace("ollama/", "")
+    if filtered_kwargs.get("model", "").startswith(("ollama/", "llmjp/")):
+       filtered_kwargs["model"] = filtered_kwargs["model"].split("/", 1)[1]
 
     t0 = time.time()
     completion = backoff_create(
