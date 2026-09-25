@@ -86,6 +86,21 @@ Respond with a Python script in triple backticks.
 """
 
 
+# NII RDC: LLM(特に llm-jp)が非 ASCII の空白(U+202F 等)をコードに混ぜると
+# `SyntaxError: invalid non-printable character` になるため、実行前にサニタイズする。
+_UNICODE_WS_FIX = {
+    0x00A0: " ", 0x2002: " ", 0x2003: " ", 0x2004: " ", 0x2005: " ",
+    0x2006: " ", 0x2007: " ", 0x2008: " ", 0x2009: " ", 0x200A: " ",
+    0x202F: " ", 0x205F: " ", 0x3000: " ",
+    0x200B: None, 0x200C: None, 0x200D: None, 0x2060: None, 0xFEFF: None,
+}
+
+
+def sanitize_code_unicode(code: str) -> str:
+    """コード中の非 ASCII 空白/ゼロ幅文字を通常空白に直す/除去する。"""
+    return code.translate(_UNICODE_WS_FIX)
+
+
 def extract_code_snippet(text: str) -> str:
     """
     Look for a Python code block in triple backticks in the LLM response.
@@ -93,7 +108,7 @@ def extract_code_snippet(text: str) -> str:
     """
     pattern = r"```(?:python)?(.*?)```"
     matches = re.findall(pattern, text, flags=re.DOTALL)
-    return matches[0].strip() if matches else text.strip()
+    return sanitize_code_unicode(matches[0].strip() if matches else text.strip())
 
 
 def run_aggregator_script(

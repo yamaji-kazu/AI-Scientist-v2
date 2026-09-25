@@ -264,7 +264,8 @@ if __name__ == "__main__":
 
     aggregate_plots(base_folder=idea_dir, model=args.model_agg_plots)
 
-    shutil.rmtree(osp.join(idea_dir, "experiment_results"))
+    # experiment_results は最小/一部 run では作られないことがある。無ければ黙って進む。
+    shutil.rmtree(osp.join(idea_dir, "experiment_results"), ignore_errors=True)
 
     save_token_tracker(idea_dir)
 
