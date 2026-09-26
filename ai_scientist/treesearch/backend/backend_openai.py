@@ -97,7 +97,12 @@ def query(
     choice = completion.choices[0]
 
     if func_spec is None:
+        # thinking モデルは content が None/空になり得る(reasoning parser の取りこぼし、
+        # 思考だけで終わる等)。None を下流の extract_code(re.findall)に流すと落ちるので、
+        # reasoning_content か空文字へ必ず倒す(fail-safe)。根治は parser を外して生 content を得ること。
         output = choice.message.content
+        if output is None:
+            output = getattr(choice.message, "reasoning_content", None) or ""
     elif llmjp_fallback:
         # 本文から JSON を抽出(thinking モデルは llmjp4 parser で reasoning が分離され、
         # content は答えになる)。抽出できなければ素の json.loads を試す。
