@@ -1,12 +1,33 @@
 import json
 import logging
 import os
+import re
 import time
 
 from .utils import FunctionSpec, OutputType, opt_messages_to_list, backoff_create
 from funcy import notnone, once, select_values
 import openai
 from rich import print
+
+# NII RDC: llm-jp-4 系 thinking の Harmony チャネルが、この GPTQ ビルドでは特殊トークンでなく
+# 平文(" analysis <思考> assistant final <回答>")で出る。トークンベースの reasoning parser では
+# 分離できないため、content 側で final チャネル以降だけを残す。
+_HARMONY_FINAL = re.compile(r"assistant\s*final\b", re.IGNORECASE)
+
+
+def _final_channel(text: str) -> str:
+    """Harmony が平文で出る応答から final チャネル以降だけ返す。
+
+    "assistant final" が無ければ素のまま返す(analysis だけで終わる応答は下流で buggy 扱い)。
+    複数あれば最後を採る。これを外すと思考の平文がコード/JSON に混ざり IndentationError や
+    抽出失敗になる(33B 実測)。
+    """
+    if not text:
+        return text
+    last = None
+    for m in _HARMONY_FINAL.finditer(text):
+        last = m
+    return text[last.end():].lstrip() if last is not None else text
 
 logger = logging.getLogger("ai-scientist")
 
@@ -96,19 +117,19 @@ def query(
 
     choice = completion.choices[0]
 
+    # thinking モデルの content を安全に取り出す。①None は reasoning_content か空へ(fail-safe)。
+    # ②Harmony の final チャネル以降だけを残す(平文の思考をコード/JSON から除く)。
+    content = choice.message.content
+    if content is None:
+        content = getattr(choice.message, "reasoning_content", None) or ""
+    content = _final_channel(content)
+
     if func_spec is None:
-        # thinking モデルは content が None/空になり得る(reasoning parser の取りこぼし、
-        # 思考だけで終わる等)。None を下流の extract_code(re.findall)に流すと落ちるので、
-        # reasoning_content か空文字へ必ず倒す(fail-safe)。根治は parser を外して生 content を得ること。
-        output = choice.message.content
-        if output is None:
-            output = getattr(choice.message, "reasoning_content", None) or ""
+        output = content
     elif llmjp_fallback:
-        # 本文から JSON を抽出(thinking モデルは llmjp4 parser で reasoning が分離され、
-        # content は答えになる)。抽出できなければ素の json.loads を試す。
+        # final チャネルの本文から JSON を抽出。抽出できなければ素の json.loads を試す。
         from ai_scientist.llm import extract_json_between_markers
 
-        content = choice.message.content or ""
         output = extract_json_between_markers(content)
         if output is None:
             try:
