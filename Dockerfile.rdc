@@ -1,0 +1,15 @@
+# NII RDC: AI-Scientist の②コード実行段を回す隔離実験イメージ。
+# LLM 生成コードをこのコンテナ内で実行し、egress は許可リスト proxy 経由に限る(改版提案 §12.3)。
+# base は AI-Scientist README 準拠の PyTorch+CUDA。llm-jp へはコンテナ env(LLMJP_BASE_URL 等)で向ける。
+FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+
+WORKDIR /ais
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /ais/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . /ais/
