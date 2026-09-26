@@ -262,7 +262,12 @@ if __name__ == "__main__":
             dirs_exist_ok=True,
         )
 
-    aggregate_plots(base_folder=idea_dir, model=args.model_agg_plots)
+    # プロット集計は論文用の後処理で核心の外。llm-jp の出力揺れで失敗しても run 全体は
+    # 止めない(best_solution / journal 等の核心成果物は既に出ている)。
+    try:
+        aggregate_plots(base_folder=idea_dir, model=args.model_agg_plots)
+    except Exception as e:
+        print(f"[warn] aggregate_plots をスキップ(非致命): {e}")
 
     # experiment_results は最小/一部 run では作られないことがある。無ければ黙って進む。
     shutil.rmtree(osp.join(idea_dir, "experiment_results"), ignore_errors=True)
