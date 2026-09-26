@@ -350,10 +350,20 @@ if __name__ == "__main__":
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
-    # Additional cleanup: find any orphaned processes containing specific keywords
+    # Additional cleanup: find any orphaned processes containing specific keywords.
+    # NII RDC: 自分自身と祖先(シェル / timeout / コンテナ entrypoint)は除外する。
+    # 以前は cmdline に "python"/"bfts"/"experiment" を含む本プロセス自身にも SIGTERM が
+    # 飛び、正常終了なのに exit 143(128+SIGTERM)になっていた。
+    self_pids = {current_process.pid}
+    try:
+        self_pids.update(p.pid for p in current_process.parents())
+    except Exception:
+        pass
     keywords = ["python", "torch", "mp", "bfts", "experiment"]
     for proc in psutil.process_iter(["name", "cmdline"]):
         try:
+            if proc.pid in self_pids:
+                continue
             # Check both process name and command line arguments
             cmdline = " ".join(proc.cmdline()).lower()
             if any(keyword in cmdline for keyword in keywords):
