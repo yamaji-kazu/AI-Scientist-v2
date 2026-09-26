@@ -5,7 +5,10 @@ FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
 
 WORKDIR /ais
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# base image の jammy-backports が未署名で apt update を止めるため、backports を外してから入れる。
+RUN sed -i '/backports/d' /etc/apt/sources.list 2>/dev/null; \
+    sed -i '/backports/d' /etc/apt/sources.list.d/*.list 2>/dev/null; \
+    apt-get update && apt-get install -y --no-install-recommends \
       git build-essential \
     && rm -rf /var/lib/apt/lists/*
 
