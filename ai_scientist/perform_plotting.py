@@ -86,13 +86,17 @@ Respond with a Python script in triple backticks.
 """
 
 
-# NII RDC: LLM(特に llm-jp)が非 ASCII の空白(U+202F 等)をコードに混ぜると
-# `SyntaxError: invalid non-printable character` になるため、実行前にサニタイズする。
+# NII RDC: LLM(特に llm-jp)が非 ASCII の空白やダッシュをコードに混ぜると
+# `SyntaxError: invalid character` になるため、実行前にサニタイズする。
+# 空白 → 半角空白、ゼロ幅 → 除去、ダッシュ/マイナス類 → ASCII '-'(U+2011 で実測の頓挫あり)。
 _UNICODE_WS_FIX = {
     0x00A0: " ", 0x2002: " ", 0x2003: " ", 0x2004: " ", 0x2005: " ",
     0x2006: " ", 0x2007: " ", 0x2008: " ", 0x2009: " ", 0x200A: " ",
     0x202F: " ", 0x205F: " ", 0x3000: " ",
     0x200B: None, 0x200C: None, 0x200D: None, 0x2060: None, 0xFEFF: None,
+    0x00AD: None,  # soft hyphen
+    0x2010: "-", 0x2011: "-", 0x2012: "-", 0x2013: "-", 0x2014: "-",
+    0x2015: "-", 0x2043: "-", 0x2212: "-",  # 各種ダッシュ・図表ダッシュ・マイナス記号
 }
 
 
