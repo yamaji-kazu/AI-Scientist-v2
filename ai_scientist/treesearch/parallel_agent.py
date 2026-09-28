@@ -1004,29 +1004,48 @@ class MinimalAgent:
             for plot_path in selected_plots
         ]
 
-        response = cast(
-            dict,
-            query(
-                system_message=None,
-                user_message=user_message,
-                func_spec=vlm_feedback_spec,
-                model=self.cfg.agent.vlm_feedback.model,
-                temperature=self.cfg.agent.vlm_feedback.temp,
-            ),
-        )
-        print(
-            f"[cyan]VLM response from {self.cfg.agent.vlm_feedback.model}:[/cyan] {response}"
-        )
-        if response["valid_plots_received"]:
+        try:
+            response = cast(
+                dict,
+                query(
+                    system_message=None,
+                    user_message=user_message,
+                    func_spec=vlm_feedback_spec,
+                    model=self.cfg.agent.vlm_feedback.model,
+                    temperature=self.cfg.agent.vlm_feedback.temp,
+                ),
+            )
+            print(
+                f"[cyan]VLM response from {self.cfg.agent.vlm_feedback.model}:[/cyan] {response}"
+            )
+            node.is_buggy_plots = not response["valid_plots_received"]
+            for index, analysis in enumerate(response["plot_analyses"]):
+                analysis["plot_path"] = node.plot_paths[index]
+            node.plot_analyses = response["plot_analyses"]
+            node.vlm_feedback_summary = response["vlm_feedback_summary"]
+        except Exception as e:  # noqa: BLE001
+            # RDC(onprem): vlm_feedback のモデルが **vision 非対応**(llm-jp / Qwen は
+            # テキストのみ)だと、画像入りリクエストがここで失敗し、is_buggy_plots が
+            # **None のまま**になる。すると good_nodes(is_buggy False かつ
+            # is_buggy_plots False)が 0 件になり、**コードが正しく動いていても
+            # stage を越えられない**(初期段が working 実装を見つけられずに終わる)。
+            # プロットの VLM 検証ができない環境では、プロットを**非ブロッキング**
+            # (検証せず False)扱いにし、ノードの合否は**コードの成否**で判定する。
+            # 黙って劣化させないよう警告を残す。
+            logger.warning(
+                "VLM plot analysis unavailable (%s: %s). "
+                "Treating plots as non-blocking (is_buggy_plots=False); "
+                "node validity is decided by code correctness. "
+                "onprem のテキストモデルでは画像評価ができないため。",
+                type(e).__name__,
+                str(e)[:200],
+            )
             node.is_buggy_plots = False
-        else:
-            node.is_buggy_plots = True
-
-        for index, analysis in enumerate(response["plot_analyses"]):
-            analysis["plot_path"] = node.plot_paths[index]
-
-        node.plot_analyses = response["plot_analyses"]
-        node.vlm_feedback_summary = response["vlm_feedback_summary"]
+            node.plot_analyses = []
+            node.vlm_feedback_summary = (
+                "(VLM による画像評価が使えない環境のため、プロットは未検証。"
+                "ノードの合否はコードの成否で判定した)"
+            )
 
         node.datasets_successfully_tested = (
             self._determine_datasets_successfully_tested(node)

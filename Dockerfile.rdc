@@ -14,5 +14,10 @@ RUN sed -i '/backports/d' /etc/apt/sources.list 2>/dev/null; \
 
 COPY requirements.txt /ais/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+# 実験コードが素で使う定番(scikit-learn)を入れる。無いと make_moons /
+# train_test_split で ModuleNotFoundError になり、易しいタスクでも全ノードが
+# クラッシュする(2026-09-28 実測)。egress 制限は実験ランタイム網だけで、
+# ビルド時はネット可。
+RUN pip install --no-cache-dir scikit-learn
 
 COPY . /ais/
