@@ -949,6 +949,10 @@ def perform_writeup(
                 f.write(content)
 
         # Generate VLM-based descriptions
+        # NII RDC: 画像を読めるモデルが無い(オンプレの Qwen3-Coder 等)と create_vlm_client が
+        # 例外を出し、後の推敲で vlm_client が未定義になって論文執筆ごと落ちていた(2026-10-11)。
+        # 無いときは None にし、図の確認は「確かめていない」と書いて推敲を続ける。
+        vlm_client, vlm_model = None, None
         try:
             vlm_client, vlm_model = create_vlm_client(small_model)
             desc_map = {}
@@ -1033,12 +1037,12 @@ def perform_writeup(
 
             review_img_cap_ref = perform_imgs_cap_ref_review(
                 vlm_client, vlm_model, reflection_pdf
-            )
+            ) if vlm_client is not None else "(No figure review: no vision-capable model is available in this environment.)"
 
             # Detect duplicate figures between main text and appendix
             analysis_duplicate_figs = detect_duplicate_figures(
                 vlm_client, vlm_model, reflection_pdf
-            )
+            ) if vlm_client is not None else "(No figure review: no vision-capable model is available in this environment.)"
             print(analysis_duplicate_figs)
 
             # Get reflection_page_info
@@ -1122,7 +1126,7 @@ Ensure proper citation usage:
             reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
             review_img_selection = perform_imgs_cap_ref_review_selection(
                 vlm_client, vlm_model, reflection_pdf, reflection_page_info
-            )
+            ) if vlm_client is not None else "(No figure review: no vision-capable model is available in this environment.)"
             img_reflection_prompt = f"""Now let's reflect on
 The following figures are currently used in the paper: {sorted(used_figs)}
 The following figures are available in the folder but not used in the LaTeX: {sorted(unused_figs)}

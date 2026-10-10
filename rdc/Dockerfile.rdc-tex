@@ -1,0 +1,23 @@
+# NII RDC: 論文執筆(⑤)と自己査読(⑥)用。隔離実験の像(ais-exp:rdc)に TeX と poppler-utils を足す。
+# .14 は外向き通信を閉じているため、ビルドでネットを使わない。112 で同じ jammy の .deb を
+# apt-get install --download-only で取り(2026-10-11)、照合してから dpkg で入れる。
+# python3 → python3-minimal → python3.10-minimal は Pre-Depends で、先に設定済みでないと入らない
+# (まとめて dpkg -i すると python3 と、それに依る texlive-latex-extra 等が未設定で残る。2026-10-11 実測)。
+# 先にこの順で入れ、最後に dpkg --audit が空(未設定の部品が無い)であることを確かめる。
+#   texdebs/: texlive-latex-{base,recommended,extra} texlive-fonts-recommended texlive-science
+#             texlive-bibtex-extra chktex lmodern cm-super(PDF を組む・LaTeX の検査)
+#   popdebs/: poppler-utils(pdftotext。論文執筆がページ数と参考文献の位置を確かめる)
+FROM ais-exp:rdc
+COPY texdebs/ /tmp/texdebs/
+COPY popdebs/ /tmp/popdebs/
+RUN cd /tmp/texdebs && sha256sum -c --quiet SHA256SUMS && cd /tmp/popdebs && sha256sum -c --quiet SHA256SUMS \
+    && export DEBIAN_FRONTEND=noninteractive \
+    && cd /tmp/texdebs \
+    && dpkg -i libpython3.10-minimal_*.deb python3.10-minimal_*.deb > /tmp/dpkg0.log 2>&1 \
+    && dpkg -i python3-minimal_*.deb > /tmp/dpkg1.log 2>&1 \
+    && dpkg -i /tmp/texdebs/*.deb /tmp/popdebs/*.deb > /tmp/dpkg2.log 2>&1 \
+    && dpkg --configure -a \
+    && test -z "$(dpkg --audit)" \
+    && rm -rf /tmp/texdebs /tmp/popdebs \
+    && pdflatex --version | head -1 && bibtex --version | head -1 && chktex --version | head -1 \
+    && pdftotext -v 2>&1 | head -1
