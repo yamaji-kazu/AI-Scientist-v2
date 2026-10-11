@@ -42,8 +42,65 @@ def remove_accents_and_clean(s):
     return ascii_str
 
 
+_RDC_CJK = re.compile(r"[\u3000-\u30ff\u3400-\u9fff\uff00-\uffef]")
+
+
+def rdc_enable_cjk(cwd):
+    """NII RDC: 和文(参考文献の題名・著者名など)があれば、組む直前に CJKutf8 を差し込む。
+
+    DR の調査の文献は CiNii の和文献が中心で、pdflatex は和文字が来ると PDF を出さずに止まる
+    (2026-10-11、112 で実測)。モデルが前置きを書き換えても効くよう、テンプレートではなく
+    組む直前の template.tex に入れる。references.bib は filecontents で本文に入っているので
+    ここで一緒に見る。本文全体を CJK 環境で包む(英文はそのまま組まれる)。
+    """
+    path = osp.join(cwd, "template.tex")
+    try:
+        tex = open(path, encoding="utf-8").read()
+    except OSError:
+        return False
+    if not _RDC_CJK.search(tex) or "CJKutf8" in tex:
+        return False
+    if "\\begin{document}" not in tex or "\\end{document}" not in tex:
+        return False
+    tex = tex.replace("\\begin{document}", "\\usepackage{CJKutf8}\n\\begin{document}\n\\begin{CJK}{UTF8}{min}", 1)
+    i = tex.rfind("\\end{document}")
+    tex = tex[:i] + "\\end{CJK}\n" + tex[i:]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(tex)
+    print("[rdc] 和文があるので CJKutf8 を差し込みました")
+    return True
+
+
+def rdc_fix_bibliography(cwd):
+    """NII RDC: 本文の filecontents の文献(references.bib)が、実際に組まれるようにする。
+
+    - filecontents は同じ名前のファイルが既にあると書き出さない(「Not generating it from this
+      source」)。推敲のたびに文献を足しても、最初に組んだときの references.bib が残り、足した
+      文献が「?」になる。組む前に消して、本文の版から作り直させる
+    - ひな形の \\bibliography{iclr2025} は見本の文献を指していて、本文の references.bib を読まない
+      (2026-10-11 に .14 で確かめた)。filecontents があるときは references を読ませる
+    """
+    path = osp.join(cwd, "template.tex")
+    try:
+        tex = open(path, encoding="utf-8").read()
+    except OSError:
+        return
+    if "\\begin{filecontents}{references.bib}" not in tex:
+        return
+    try:
+        os.remove(osp.join(cwd, "references.bib"))
+    except OSError:
+        pass
+    fixed = re.sub(r"\\bibliography\{iclr2025\}", r"\\bibliography{references}", tex)
+    if fixed != tex:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(fixed)
+
+
 def compile_latex(cwd, pdf_file, timeout=30):
     print("GENERATING LATEX")
+    rdc_fix_bibliography(cwd)
+    rdc_enable_cjk(cwd)
 
     commands = [
         ["pdflatex", "-interaction=nonstopmode", "template.tex"],

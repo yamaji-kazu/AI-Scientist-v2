@@ -1,0 +1,13 @@
+# NII RDC: 論文の参考文献に日本語の題名・著者名を組むため、ais-exp:rdc-tex に CJK(和文)を足す(2026-10-11)。
+# DR の調査の文献は CiNii の和文献が中心で、pdflatex は和文字が来ると PDF を出さずに止まる(112 で実測)。
+# latex-cjk-japanese と明朝体の字形(wadalab)で CJKutf8 の {UTF8}{min} が組めることを 112 で確かめた。
+# .14 は外向き通信を閉じているため、112 で同じ jammy の .deb を取り(元の像に入っている部品は除く)、照合して入れる。
+FROM ais-exp:rdc-tex
+COPY cjkdebs/ /tmp/cjkdebs/
+RUN cd /tmp/cjkdebs && sha256sum -c --quiet SHA256SUMS \
+    && export DEBIAN_FRONTEND=noninteractive \
+    && dpkg -i /tmp/cjkdebs/*.deb > /tmp/dpkg-cjk.log 2>&1 \
+    && dpkg --configure -a \
+    && test -z "$(dpkg --audit)" \
+    && rm -rf /tmp/cjkdebs \
+    && kpsewhich CJKutf8.sty

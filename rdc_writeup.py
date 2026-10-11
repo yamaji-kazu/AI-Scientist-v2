@@ -10,7 +10,9 @@ launch_scientist_bfts.py の論文執筆の段をそのまま使わない理由(
 - 8 ページ形式の perform_writeup.py は LLM の呼び方が古い(msg=)ままで動かない。4 ページの
   ワークショップ形式(perform_icbinb_writeup.py)を使う
 - 文献の検索(Semantic Scholar)は外向き通信を要する。.14 は外向き通信を閉じているので
-  num_cite_rounds=0 で回し、引用の検索をしなかったことを状態に残す
+  num_cite_rounds=0 で回す。文献は、研究計画のもとになった DR の調査の参考文献と、計画で再利用する
+  データ(引用の義務 rdc:cite)を、実行器が <idea_dir>/rdc_references.bib に置く(2026-10-11)。
+  無ければ文献なしで書き、そのことを状態に残す
 - 査読の図の確認(perform_imgs_cap_ref_review)は画像を読むモデルを要する。Qwen3-Coder は
   画像を読めないので、本文の査読だけを必須とし、図の確認は失敗しても段を落とさない
 
@@ -136,6 +138,37 @@ def choose_paper(idea_dir: str) -> tuple[str | None, list[dict]]:
     return (cands[0]["pdf"] if cands else None), cands
 
 
+REFS = "rdc_references.bib"
+REFS_META = "rdc_references.json"
+
+
+def references(idea_dir: str) -> tuple[str, list[str]]:
+    """実行器が置いた文献(BibTeX)と、その鍵の一覧。無ければ空。"""
+    p = osp.join(idea_dir, REFS)
+    if not osp.exists(p):
+        return "", []
+    bib = open(p, encoding="utf-8").read()
+    return bib, re.findall(r"@\w+\{([^,\s]+),", bib)
+
+
+def cited_in(pdf: str, idea_dir: str) -> dict:
+    """論文の PDF に、渡した文献が何件載ったか(題名の頭で照らす)。データの引用は義務なので分けて数える。"""
+    try:
+        meta = json.load(open(osp.join(idea_dir, REFS_META), encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    text = re.sub(r"\s+", "", pdf_text(pdf))
+    def shown(e):
+        t = re.sub(r"\s+", "", e.get("title") or "")[:12]
+        return bool(t) and t in text
+    lit = [e for e in meta if e.get("kind") == "literature"]
+    ds = [e for e in meta if e.get("kind") == "dataset"]
+    return {"literature": sum(1 for e in lit if shown(e)), "literature_given": len(lit),
+            "datasets": sum(1 for e in ds if shown(e)), "datasets_given": len(ds),
+            "datasets_not_cited": [e.get("key") for e in ds if not shown(e)],
+            "unresolved": pdf_text(pdf).count("[?]") + len(re.findall(r"\(\?\)|\s\?\.", pdf_text(pdf)))}
+
+
 def writeup(idea_dir: str, model: str, retries: int) -> int:
     status(idea_dir, "writeup", "running", "実験の要約を作っています")
     try:
@@ -148,12 +181,14 @@ def writeup(idea_dir: str, model: str, retries: int) -> int:
     # TypeError になる(2026-10-11 実測)。4 ページのワークショップ形式(ICBINB)を使う。
     from ai_scientist.perform_icbinb_writeup import perform_writeup
 
+    bib, keys = references(idea_dir)
+    cites = f"{len(keys)} entries (DR survey and reused datasets)" if keys else "none (no references given)"
     cands: list[dict] = []
     for attempt in range(1, retries + 1):
         status(idea_dir, "writeup", "running", f"論文を書いています({attempt}/{retries} 回目)",
-               attempt=attempt, citations="none (no external network)")
+               attempt=attempt, citations=cites)
         try:
-            ok = perform_writeup(base_folder=idea_dir, citations_text="", num_cite_rounds=0,
+            ok = perform_writeup(base_folder=idea_dir, citations_text=bib, num_cite_rounds=0,
                                  small_model=model, big_model=model, n_writeup_reflections=2,
                                  page_limit=4)
         except Exception:  # noqa: BLE001
@@ -165,7 +200,7 @@ def writeup(idea_dir: str, model: str, retries: int) -> int:
             shutil.copyfile(osp.join(idea_dir, best), osp.join(idea_dir, PAPER))
             status(idea_dir, "writeup", "done", "論文を書き終えました", pdf=PAPER, chosen=best,
                    grounding=score, candidates=cands, terms=idea_terms(idea_dir), attempt=attempt,
-                   citations="none (no external network)")
+                   citations=cites, cited=cited_in(osp.join(idea_dir, PAPER), idea_dir))
             return 0
         if best:
             print(f"[rdc] どの版も題材の語が半分に満たない(最高 {score}): {cands}", flush=True)
