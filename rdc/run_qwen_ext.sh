@@ -16,7 +16,9 @@ fi
 IDEA_HOST=~/AI-Scientist-v2/ai_scientist/ideas/ext_data_demo.json
 IDEA=ai_scientist/ideas/ext_data_demo.json
 if [ -n "$AIS_IDEA" ]; then
-  IDEA_HOST="$AIS_IDEA"
+  # 実行器は ~/rdc-exchange/... の形で渡す。docker は絶対パスでないとボリューム名と読むので展開する(2026-10-11)
+  IDEA_HOST="${AIS_IDEA/#\~/$HOME}"
+  [ -f "$IDEA_HOST" ] || { echo "題材のファイルがありません: $IDEA_HOST"; echo "QWEN_EASY_EXIT=2 $(date +%H:%M:%S)"; exit 2; }
   IDEA=ai_scientist/ideas/rdc_plan_idea.json
 fi
 sudo docker rm -f ais-qwen-ext 2>/dev/null
