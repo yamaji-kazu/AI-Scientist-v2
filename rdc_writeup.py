@@ -184,6 +184,7 @@ def writeup(idea_dir: str, model: str, retries: int) -> int:
     bib, keys = references(idea_dir)
     cites = f"{len(keys)} entries (DR survey and reused datasets)" if keys else "none (no references given)"
     cands: list[dict] = []
+    last_reason = None
     for attempt in range(1, retries + 1):
         status(idea_dir, "writeup", "running", f"論文を書いています({attempt}/{retries} 回目)",
                attempt=attempt, citations=cites)
@@ -194,6 +195,9 @@ def writeup(idea_dir: str, model: str, retries: int) -> int:
         except Exception:  # noqa: BLE001
             traceback.print_exc()
             ok = False
+        # 黙って失敗していた箇所の理由(出力の上限で切れた など)を、最後の失敗の文言に使う
+        import ai_scientist.perform_icbinb_writeup as icbinb
+        last_reason = icbinb.LAST_FAILURE or last_reason
         best, cands = choose_paper(idea_dir)
         score = cands[0]["score"] if cands else 0.0
         if best and score >= 0.5:
@@ -204,9 +208,14 @@ def writeup(idea_dir: str, model: str, retries: int) -> int:
             return 0
         if best:
             print(f"[rdc] どの版も題材の語が半分に満たない(最高 {score}): {cands}", flush=True)
-    status(idea_dir, "writeup", "failed",
-           f"{retries} 回試しましたが、実験に沿った論文の PDF を組めませんでした",
-           candidates=cands)
+    # PDF ができたが題材に沿わなかったのか、PDF まで行かなかったのかを分けて出す
+    if cands:
+        step = f"{retries} 回試しましたが、実験に沿った論文の PDF を組めませんでした(題材の語が半分に満たない)"
+    elif last_reason:
+        step = f"{retries} 回試しましたが、論文の PDF を組む前に止まりました: {last_reason}"
+    else:
+        step = f"{retries} 回試しましたが、論文の PDF を組めませんでした"
+    status(idea_dir, "writeup", "failed", step[:300], candidates=cands, reason=last_reason)
     return 1
 
 

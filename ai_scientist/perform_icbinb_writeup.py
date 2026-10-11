@@ -18,6 +18,28 @@ from ai_scientist.llm import (
 )
 
 from ai_scientist.utils.token_tracker import track_token_usage
+import ai_scientist.llm as llm_module
+
+# NII RDC: 論文の LaTeX を丸ごと返させる呼び出しの出力上限。既定の 4096 では、Qwen3-Coder の
+# 論文が途中で切れて閉じの ``` が出ず、ブロックが見つからないまま黙って失敗していた
+# (run-7d560480, 2026-10-11: 2 回とも生成が約 41 秒 = 毎秒約 100 トークンで 4096 に当たる長さで
+# 止まった)。全体の MAX_NUM_TOKENS は研究実行(④)の条件も変えるので触らず、ここだけ広げる。
+# 推敲は直前の返答 1 件だけを履歴に渡す(msg_history[-1:])ので、入力 2 万弱 + 前の論文 + 出力で
+# vLLM の文脈長 65536 に収まる。
+WRITEUP_MAX_TOKENS = int(os.environ.get("RDC_WRITEUP_MAX_TOKENS", "16000"))
+# 直近の perform_writeup がやめた理由(rdc_writeup.py が画面の文言に使う)
+LAST_FAILURE = None
+
+
+def _no_latex_reason(response, where):
+    """LaTeX のブロックが無かったときの理由を、出力の上限で切れたかどうかと末尾で示す。"""
+    finish = llm_module.LAST_FINISH_REASON
+    if finish == "length":
+        head = f"{where}: 出力が上限({WRITEUP_MAX_TOKENS} トークン)で途中で切れ、LaTeX のブロックが閉じませんでした"
+    else:
+        head = f"{where}: 返答に LaTeX のブロック(```latex … ```)がありませんでした(終わり方: {finish})"
+    tail = (response or "")[-300:].replace("\n", "\\n")
+    return head, tail
 
 from ai_scientist.tools.semantic_scholar import search_for_papers
 
@@ -921,6 +943,8 @@ def perform_writeup(
     n_writeup_reflections=3,
     page_limit=4,
 ):
+    global LAST_FAILURE
+    LAST_FAILURE = None
     pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}.pdf")
     latex_folder = osp.join(base_folder, "latex")
 
@@ -1061,10 +1085,13 @@ def perform_writeup(
             model=big_client_model,
             system_message=big_model_system_message,
             print_debug=False,
+            max_tokens=WRITEUP_MAX_TOKENS,
         )
 
         latex_code_match = re.search(r"```latex(.*?)```", response, re.DOTALL)
         if not latex_code_match:
+            LAST_FAILURE, tail = _no_latex_reason(response, "最初の原稿")
+            print(f"[rdc] {LAST_FAILURE}\n[rdc] 返答の末尾: {tail}", flush=True)
             return False
         updated_latex_code = latex_code_match.group(1).strip()
         with open(writeup_file, "w") as f:
@@ -1150,6 +1177,7 @@ Ensure proper citation usage:
                 system_message=big_model_system_message,
                 msg_history=msg_history[-1:],
                 print_debug=False,
+                max_tokens=WRITEUP_MAX_TOKENS,
             )
 
             # 2nd run:
@@ -1178,6 +1206,8 @@ Ensure proper citation usage:
                     break
             else:
                 print(f"No valid LaTeX code block found in reflection step {i+1}.")
+                reason, tail = _no_latex_reason(reflection_response, f"推敲 {i+1} 回目")
+                print(f"[rdc] {reason}(前の版を残して推敲を終えます)\n[rdc] 返答の末尾: {tail}", flush=True)
                 break
             # Get new reflection_page_info
             reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
@@ -1212,6 +1242,7 @@ If you believe you are done with reflection, simply say: "I am done"."""
                 system_message=big_model_system_message,
                 msg_history=msg_history[-1:],
                 print_debug=False,
+                max_tokens=WRITEUP_MAX_TOKENS,
             )
 
             if "I am done" in reflection_response:
@@ -1245,6 +1276,8 @@ If you believe you are done with reflection, simply say: "I am done"."""
                     break
             else:
                 print(f"No valid LaTeX code block found in reflection step {i+1}.")
+                reason, tail = _no_latex_reason(reflection_response, f"推敲 {i+1} 回目")
+                print(f"[rdc] {reason}(前の版を残して推敲を終えます)\n[rdc] 返答の末尾: {tail}", flush=True)
                 break
 
         # Final reflection on page limit
@@ -1262,6 +1295,7 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
             system_message=big_model_system_message,
             msg_history=msg_history[-1:],
             print_debug=False,
+            max_tokens=WRITEUP_MAX_TOKENS,
         )
 
         reflection_pdf = osp.join(
@@ -1297,9 +1331,10 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
 
         return osp.exists(reflection_pdf)
 
-    except Exception:
+    except Exception as e:
         print("EXCEPTION in perform_writeup:")
         print(traceback.format_exc())
+        LAST_FAILURE = f"論文執筆の途中で例外: {type(e).__name__}: {e}"[:300]
         return False
 
 

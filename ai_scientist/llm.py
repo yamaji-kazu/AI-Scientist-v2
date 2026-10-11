@@ -9,6 +9,9 @@ import backoff
 import openai
 
 MAX_NUM_TOKENS = 4096
+# NII RDC: 直近の呼び出しの終わり方("stop" / "length" など)。論文執筆が LaTeX のブロックを
+# 見つけられなかったとき、出力の上限で切れたのかを区別して示すために残す(2026-10-12)。
+LAST_FINISH_REASON = None
 
 AVAILABLE_LLMS = [
     # NII RDC: onprem llm-jp via vLLM (OpenAI-compatible). 改版提案 §12.2 のデータフロー既定
@@ -220,7 +223,7 @@ def get_batch_responses_from_llm(
 
 
 @track_token_usage
-def make_llm_call(client, model, temperature, system_message, prompt):
+def make_llm_call(client, model, temperature, system_message, prompt, max_tokens=None):
     if model.startswith("ollama/") or model.startswith("llmjp/"):
         return client.chat.completions.create(
             model=model.split("/", 1)[1],
@@ -229,7 +232,7 @@ def make_llm_call(client, model, temperature, system_message, prompt):
                 *prompt,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=max_tokens or MAX_NUM_TOKENS,
             n=1,
             stop=None,
         )
@@ -241,7 +244,7 @@ def make_llm_call(client, model, temperature, system_message, prompt):
                 *prompt,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=max_tokens or MAX_NUM_TOKENS,
             n=1,
             stop=None,
             seed=0,
@@ -279,6 +282,7 @@ def get_response_from_llm(
     print_debug=False,
     msg_history=None,
     temperature=0.7,
+    max_tokens=None,
 ) -> tuple[str, list[dict[str, Any]]]:
     msg = prompt
     if msg_history is None:
@@ -298,7 +302,7 @@ def get_response_from_llm(
         ]
         response = client.messages.create(
             model=model,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=max_tokens or MAX_NUM_TOKENS,
             temperature=temperature,
             system=system_message,
             messages=new_msg_history,
@@ -325,7 +329,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=max_tokens or MAX_NUM_TOKENS,
             n=1,
             stop=None,
         )
@@ -339,6 +343,7 @@ def get_response_from_llm(
             temperature,
             system_message=system_message,
             prompt=new_msg_history,
+            max_tokens=max_tokens,
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
@@ -350,6 +355,7 @@ def get_response_from_llm(
             temperature,
             system_message=system_message,
             prompt=new_msg_history,
+            max_tokens=max_tokens,
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
@@ -362,7 +368,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=max_tokens or MAX_NUM_TOKENS,
             n=1,
             stop=None,
         )
@@ -378,7 +384,7 @@ def get_response_from_llm(
                     *new_msg_history,
                 ],
                 temperature=temperature,
-                max_tokens=MAX_NUM_TOKENS,
+                max_tokens=max_tokens or MAX_NUM_TOKENS,
                 n=1,
                 stop=None,
             )
@@ -397,7 +403,7 @@ def get_response_from_llm(
                 },
                 "parameters": {
                     "temperature": temperature,
-                    "max_new_tokens": MAX_NUM_TOKENS,
+                    "max_new_tokens": max_tokens or MAX_NUM_TOKENS,
                     "return_full_text": False
                 }
             }
@@ -421,7 +427,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=max_tokens or MAX_NUM_TOKENS,
             n=1,
             stop=None,
         )
@@ -436,13 +442,21 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=max_tokens or MAX_NUM_TOKENS,
             n=1,
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     else:
         raise ValueError(f"Model {model} not supported.")
+
+    global LAST_FINISH_REASON
+    try:
+        LAST_FINISH_REASON = (
+            response.stop_reason if "claude" in model else response.choices[0].finish_reason
+        )
+    except Exception:  # noqa: BLE001 — HuggingFace の直呼びなど、終わり方を持たない応答
+        LAST_FINISH_REASON = None
 
     if print_debug:
         print()
