@@ -205,6 +205,8 @@ def writeup(idea_dir: str, model: str, retries: int) -> int:
             status(idea_dir, "writeup", "done", "論文を書き終えました", pdf=PAPER, chosen=best,
                    grounding=score, candidates=cands, terms=idea_terms(idea_dir), attempt=attempt,
                    citations=cites, cited=cited_in(osp.join(idea_dir, PAPER), idea_dir))
+            # 日本語版は英語の論文の訳。失敗しても英語の論文は完了のまま(理由は writeup.ja に残る)
+            translate_ja(idea_dir, model)
             return 0
         if best:
             print(f"[rdc] どの版も題材の語が半分に満たない(最高 {score}): {cands}", flush=True)
@@ -324,14 +326,331 @@ def review(idea_dir: str, model: str) -> int:
     return 0
 
 
+# ─────────────────────── 日本語版(英語の論文の訳) ───────────────────────
+# 英語の論文ができた後に、その LaTeX を節ごとに日本語に訳し、rdc_paper_ja.pdf に組む(2026-10-12)。
+# 一から書かせず訳にするのは、数値・図・引用を英語版と同じにし、自己査読と実験の記録との照合が
+# 済んだ英語版の「訳」という位置づけをはっきりさせるため。訳で数値や引用が落ちたり変わったり
+# しないよう、節ごとに機械で照らし、合わなければ 1 度だけ訳し直す。それでも合わなければ日本語版は
+# 出さず、理由を残す(英語の論文は完了のまま)。
+PAPER_JA = "rdc_paper_ja.pdf"
+JA_CHUNK = 6000  # 1 回に訳す LaTeX の長さ(文字)。出力の上限(WRITEUP_MAX_TOKENS)に十分収まる
+
+_JA_SYSTEM = (
+    "You translate scientific papers written in LaTeX from English into Japanese, in a formal academic "
+    "style (である調). Rules:\n"
+    "- Translate only the natural-language text. Keep every LaTeX command, environment, math, \\cite{...}, "
+    "\\citep{...}, \\citet{...}, \\ref{...}, \\label{...}, \\includegraphics{...}, \\url{...} and file name "
+    "exactly as given.\n"
+    "- Keep every number exactly as written (do not convert, round, or spell out numbers).\n"
+    "- Do not add, remove, summarize or explain anything. Keep the same structure and order.\n"
+    "- Write only in Japanese (kanji, hiragana, katakana). Never use Korean Hangul or other scripts.\n"
+    "- Output only the translated fragment inside one ```latex ... ``` block."
+)
+
+
+def _braced(tex: str, start: int) -> int:
+    """tex[start] が '{' のとき、対応する '}' の位置を返す(無ければ -1)。"""
+    depth = 0
+    for i in range(start, len(tex)):
+        c = tex[i]
+        if c == "\\":
+            continue
+        if c == "{" and (i == 0 or tex[i - 1] != "\\"):
+            depth += 1
+        elif c == "}" and tex[i - 1] != "\\":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _tex_facts(tex: str) -> dict:
+    """訳の前後で変わってはならないもの。"""
+    def keys(pattern):
+        out = set()
+        for m in re.finditer(pattern, tex):
+            out.update(k.strip() for k in m.group(1).split(",") if k.strip())
+        return out
+    no_math_cmd = re.sub(r"\\[A-Za-z]+", " ", tex)
+    return {
+        "cite": keys(r"\\cite[pt]?\*?(?:\[[^\]]*\])*\{([^}]*)\}"),
+        "ref": keys(r"\\(?:ref|eqref|autoref|cref|Cref)\{([^}]*)\}"),
+        "label": keys(r"\\label\{([^}]*)\}"),
+        "graphics": keys(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]*)\}"),
+        "numbers": set(re.findall(r"(?<![A-Za-z0-9.])\d+(?:\.\d+)?(?![0-9])", no_math_cmd.replace(",", ""))),
+        "begin": len(re.findall(r"\\begin\{", tex)),
+        "end": len(re.findall(r"\\end\{", tex)),
+    }
+
+
+def _check_translation(en: str, ja: str) -> list[str]:
+    """英語の断片と訳を照らし、食い違いを文で返す(空なら合っている)。"""
+    a, b = _tex_facts(en), _tex_facts(ja)
+    problems = []
+    for key, label in (("cite", "引用"), ("ref", "参照"), ("label", "ラベル"), ("graphics", "図のファイル")):
+        if a[key] != b[key]:
+            lost, added = sorted(a[key] - b[key]), sorted(b[key] - a[key])
+            problems.append(f"{label}が変わった(消えた {lost[:5]}、増えた {added[:5]})")
+    lost = sorted(a["numbers"] - b["numbers"])
+    if lost:
+        problems.append(f"数値が消えた {lost[:8]}")
+    # 英語の three などを 3 と書くのは許す(10 以下の整数)。それ以外に増えた数値は作り話の疑い
+    added = sorted(n for n in b["numbers"] - a["numbers"] if not (n.isdigit() and int(n) <= 10))
+    if added:
+        problems.append(f"英語版に無い数値が増えた {added[:8]}")
+    if (a["begin"], a["end"]) != (b["begin"], b["end"]):
+        problems.append(f"環境の数が変わった(begin {a['begin']}→{b['begin']}、end {a['end']}→{b['end']})")
+    # 和文の字形(wadalab)は JIS の文字集合の分しか無い。ハングルなどが混じると PDF を組めない
+    # (2026-10-12 の試し: 「実践者들이」で udmjb4 の字形が無く止まった)
+    foreign = sorted({ch for ch in ja if ord(ch) > 127 and not _in_jis(ch)})
+    if foreign:
+        problems.append(f"日本語の文字集合に無い文字が混じった {foreign[:8]}")
+    if not re.search(r"[\u3040-\u30ff]", ja) and re.search(r"[A-Za-z]{4,}", re.sub(r"\\[A-Za-z]+|\{[^}]*\}", "", en)):
+        problems.append("日本語になっていない")
+    return problems
+
+
+def _in_jis(ch: str) -> bool:
+    try:
+        ch.encode("euc_jp")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z]{6,}", text.lower()))
+
+
+def _split_body(body: str) -> list[str]:
+    """本文を節(\\section)ごとに分け、長い節は段落の切れ目でさらに分ける。"""
+    parts = [p for p in re.split(r"(?m)^(?=\\section\*?\{)", body) if p]
+    out = []
+    for p in parts:
+        while len(p) > JA_CHUNK:
+            cut = p.rfind("\n\n", 0, JA_CHUNK)
+            if cut <= 0:
+                cut = p.find("\n\n", JA_CHUNK)
+            if cut <= 0:
+                break
+            out.append(p[:cut + 2])
+            p = p[cut + 2:]
+        out.append(p)
+    return out
+
+
+# Qwen3-Coder は日本語の訳に、韓国語の助詞(ハングル)を混ぜることがある。頼み直しても、温度を変えても、
+# 直させても同じ所に同じ字を出した(2026-10-12: practitioners を「実践者들이」)。出力の形を縛る
+# (structured_outputs)と節や本文が落ちた。日本語の直後の短い助詞だけを決まった表で置き換え、
+# 置き換えたことを状態に残す。表に無いもの・長いハングルは置き換えず、日本語版を出さない
+_HANGUL_PARTICLES = {"들이": "たちが", "들은": "たちは", "들을": "たちを", "들의": "たちの", "들에게": "たちに",
+                     "들": "たち", "이": "が", "가": "が", "은": "は", "는": "は", "을": "を", "를": "を",
+                     "의": "の", "에": "に", "에서": "で", "와": "と", "과": "と", "도": "も"}
+_HANGUL_RUN = re.compile(r"(?<=[\u3040-\u30ff\u4e00-\u9fff])([\uac00-\ud7af]{1,3})")
+
+
+def _repair_hangul(ja: str) -> tuple[str, list[str]]:
+    """日本語の直後の短いハングル(助詞)を表で置き換える。置き換えた記録を返す。"""
+    notes: list[str] = []
+    def sub(m):
+        run = m.group(1)
+        if run in _HANGUL_PARTICLES:
+            notes.append(f"{run}→{_HANGUL_PARTICLES[run]}")
+            return _HANGUL_PARTICLES[run]
+        return run
+    return _HANGUL_RUN.sub(sub, ja), notes
+
+
+def _feedback_en(en: str, ja: str) -> str:
+    """照合の食い違いを、モデルに渡す英語の指示にする(日本語の状態の文とは別に作る)。"""
+    a, b = _tex_facts(en), _tex_facts(ja)
+    out = []
+    foreign = sorted({ch for ch in ja if ord(ch) > 127 and not _in_jis(ch)})
+    if foreign:
+        out.append(f"These characters are not Japanese and must not appear: {foreign}. "
+                   "Rewrite the sentences that contain them in Japanese only.")
+    for key in ("cite", "ref", "label", "graphics"):
+        if a[key] != b[key]:
+            out.append(f"The {key} keys must be exactly {sorted(a[key])}.")
+    lost = sorted(a["numbers"] - b["numbers"])
+    if lost:
+        out.append(f"These numbers from the original are missing: {lost}.")
+    added = sorted(n for n in b["numbers"] - a["numbers"] if not (n.isdigit() and int(n) <= 10))
+    if added:
+        out.append(f"These numbers are not in the original and must be removed: {added}.")
+    if (a["begin"], a["end"]) != (b["begin"], b["end"]):
+        out.append("Keep every \\begin{...} and \\end{...} of the original.")
+    return " ".join(out) or "Follow the rules exactly."
+
+
+def _translate_piece(text: str, client, model: str) -> tuple[str | None, list[str], list[str]]:
+    """1 つの断片を訳す。照合に通らなければ、(2 回目)前の訳と食い違いを渡して直させ、
+    (3 回目)温度を変えて訳し直す。同じ頼み方の繰り返しでは、同じ誤りを返した
+    (2026-10-12: Qwen3-Coder が practitioners を、温度を変えても「実践者들이」と訳した)。"""
+    from ai_scientist.llm import get_response_from_llm
+    from ai_scientist.perform_icbinb_writeup import WRITEUP_MAX_TOKENS
+    first = f"Translate this LaTeX fragment into Japanese.\n\n```latex\n{text}\n```"
+    problems: list[str] = []
+    prev = None
+    for attempt in (1, 2, 3):
+        if attempt == 2 and prev is not None:
+            prompt = (f"Original:\n```latex\n{text}\n```\n\nYour Japanese translation:\n```latex\n{prev}\n```\n\n"
+                      f"Problems: {_feedback_en(text, prev)}\n"
+                      "Fix only these problems and output the whole corrected translation.")
+            temperature = 0.2
+        else:
+            prompt, temperature = first, (0.2 if attempt == 1 else 0.7)
+        resp, _ = get_response_from_llm(prompt=prompt, client=client, model=model, system_message=_JA_SYSTEM,
+                                        temperature=temperature, max_tokens=WRITEUP_MAX_TOKENS)
+        m = re.search(r"```latex(.*?)```", resp, re.DOTALL)
+        if not m:
+            problems = ["訳に LaTeX のブロックが無い"]
+            continue
+        ja = m.group(1).strip("\n")
+        problems = _check_translation(text, ja)
+        if not problems:
+            return ja, [], []
+        if all(p.startswith("日本語の文字集合に無い文字") for p in problems):
+            fixed, notes = _repair_hangul(ja)
+            if notes and not _check_translation(text, fixed):
+                return fixed, [], notes
+        prev = ja
+    return None, problems, []
+
+
+def set_ja(idea_dir: str, **ja) -> None:
+    """論文執筆(writeup)の状態に、日本語版の結果を足す(英語の論文の状態は変えない)。"""
+    path = osp.join(idea_dir, "rdc_phase.json")
+    cur = json.load(open(path))
+    cur.setdefault("writeup", {})["ja"] = {**ja, "updated": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    with open(path + ".tmp", "w") as f:
+        json.dump(cur, f, ensure_ascii=False, indent=2)
+    os.replace(path + ".tmp", path)
+    print(f"[rdc] writeup(ja): {ja.get('state')} — {ja.get('step')}", flush=True)
+
+
+def translate_ja(idea_dir: str, model: str) -> int:
+    """英語の論文(rdc_paper.pdf として採った版)の LaTeX を日本語に訳し、rdc_paper_ja.pdf に組む。"""
+    try:
+        wu = json.load(open(osp.join(idea_dir, "rdc_phase.json"))).get("writeup") or {}
+    except Exception:  # noqa: BLE001
+        wu = {}
+    if wu.get("state") != "done":
+        set_ja(idea_dir, state="skipped", step="英語の論文が無いので、日本語版は作りません")
+        return 1
+    chosen = wu.get("chosen") or ""
+    src = osp.join(idea_dir, osp.splitext(chosen)[0] + ".tex") if chosen else ""
+    source_note = osp.basename(src) if src else ""
+    if not (src and osp.exists(src)):
+        # 組んだ版ごとの LaTeX を残す前の実行。最後の版(latex/template.tex)は、最後の推敲で作り話に
+        # 書き換わっていることがある(run-41bc6352 では採った版は検出力分析、最後の版は事前学習の
+        # 規模の話だった)。採った版の PDF の語と比べ、違えば訳さない
+        src = osp.join(idea_dir, "latex", "template.tex")
+        source_note = "latex/template.tex(採った版の LaTeX が残っていない実行のため、最後の版)"
+        try:
+            pdf_w = _words(pdf_text(osp.join(idea_dir, PAPER)))
+            tex_w = _words(re.sub(r"\\[A-Za-z]+", " ", open(src, encoding="utf-8").read()))
+            same = len(pdf_w & tex_w) / max(1, len(pdf_w | tex_w))
+        except Exception:  # noqa: BLE001
+            same = 0.0
+        if same < 0.6:
+            set_ja(idea_dir, state="failed", source=source_note, similarity=round(same, 2),
+                   step=("採った版の論文の LaTeX が残っておらず、残っている最後の版は採った版と中身が違うため"
+                         f"(語の一致 {round(same * 100)}%)、日本語版を作りませんでした"))
+            return 1
+    set_ja(idea_dir, state="running", step="英語の論文を日本語に訳しています", source=source_note)
+    try:
+        from ai_scientist.llm import create_client
+        from ai_scientist.perform_icbinb_writeup import compile_latex
+
+        tex = open(src, encoding="utf-8").read()
+        # 文献(filecontents)は訳さない。いったん抜いて、組む前に戻す
+        held: list[str] = []
+        def hold(m):
+            held.append(m.group(0))
+            return f"%%RDC_HELD_{len(held) - 1}%%"
+        tex_wo = re.sub(r"\\begin\{filecontents\*?\}.*?\\end\{filecontents\*?\}", hold, tex, flags=re.DOTALL)
+        # 英語版を組むときに足した CJK の包みは外す(日本語版を組むときに付け直す)
+        tex_wo = tex_wo.replace("\\usepackage{CJKutf8}\n", "").replace("\\begin{CJK}{UTF8}{min}\n", "").replace("\\end{CJK}\n", "")
+        if "\\begin{document}" not in tex_wo:
+            raise RuntimeError("英語の論文の LaTeX に \\begin{document} がありません")
+        pre, body = tex_wo.split("\\begin{document}", 1)
+        client, client_model = create_client(model)
+        repaired: list[str] = []  # ハングルの助詞を置き換えた記録
+
+        t = pre.find("\\title{")
+        if t >= 0:
+            end = _braced(pre, t + len("\\title"))
+            title_ja, probs, notes = _translate_piece(pre[t:end + 1], client, client_model)
+            repaired += notes
+            if title_ja is None:
+                raise RuntimeError(f"題名の訳が英語版と合いません: {'; '.join(probs)}")
+            pre = pre[:t] + title_ja + pre[end + 1:]
+
+        pieces = _split_body(body)
+        out = []
+        for i, piece in enumerate(pieces, 1):
+            set_ja(idea_dir, state="running", step=f"英語の論文を日本語に訳しています({i}/{len(pieces)})",
+                   source=source_note)
+            if not re.search(r"[A-Za-z]{4,}", re.sub(r"\\[A-Za-z]+\*?|%%RDC_HELD_\d+%%", "", piece)):
+                out.append(piece)  # 訳す文の無い断片(命令だけ)はそのまま
+                continue
+            ja, probs, notes = _translate_piece(piece, client, client_model)
+            repaired += notes
+            if ja is None:
+                head = re.search(r"\\section\*?\{([^}]*)\}", piece)
+                where = f"「{head.group(1)}」" if head else f"{i} 番目の断片"
+                raise RuntimeError(f"{where}の訳が英語版と合いません: {'; '.join(probs)}"[:300])
+            out.append(ja + ("\n" if not ja.endswith("\n") else ""))
+        ja_tex = pre + "\\begin{document}" + "".join(out)
+        # 全体の照合は、文献を戻す前に、文献を抜いた英語版と比べる(両方とも同じ置き場所の印を持つ)
+        whole = _check_translation(tex_wo, ja_tex)
+        if whole:
+            raise RuntimeError(f"訳した論文の全体が英語版と合いません: {'; '.join(whole)}"[:300])
+        for n, block in enumerate(held):
+            ja_tex = ja_tex.replace(f"%%RDC_HELD_{n}%%", block)
+
+        latex_ja = osp.join(idea_dir, "latex_ja")
+        if osp.exists(latex_ja):
+            shutil.rmtree(latex_ja)
+        shutil.copytree(osp.join(idea_dir, "latex"), latex_ja)
+        for f in glob.glob(osp.join(latex_ja, "template.*")) + glob.glob(osp.join(latex_ja, "references.bib")):
+            if not f.endswith("template.tex"):
+                os.remove(f)
+        with open(osp.join(latex_ja, "template.tex"), "w", encoding="utf-8") as f:
+            f.write(ja_tex)
+        out_pdf = osp.join(idea_dir, PAPER_JA)
+        if osp.exists(out_pdf):
+            os.remove(out_pdf)
+        compile_latex(latex_ja, out_pdf, timeout=120)
+        if not osp.exists(out_pdf):
+            raise RuntimeError("日本語版の LaTeX を PDF に組めませんでした")
+        text = pdf_text(out_pdf)
+        kana = len(re.findall(r"[\u3040-\u30ff]", text))
+        en_unres = pdf_text(osp.join(idea_dir, PAPER)).count("?")
+        if kana < 200:
+            raise RuntimeError(f"日本語版の PDF に日本語がほとんどありません(かな {kana} 字。和文の字形が組めていない疑い)")
+        set_ja(idea_dir, state="done",
+               step="日本語版を作りました" + (f"(訳に混じった韓国語の助詞 {len(repaired)} か所を置き換えた)" if repaired else ""),
+               repaired=repaired, pdf=PAPER_JA, source=source_note,
+               pieces=len(pieces), kana=kana, question_marks={"en": en_unres, "ja": text.count("?")})
+        return 0
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        set_ja(idea_dir, state="failed", step=f"日本語版を作れませんでした: {e}"[:300], source=source_note)
+        return 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["writeup", "review"])
+    ap.add_argument("phase", choices=["writeup", "review", "translate"])
     ap.add_argument("idea_dir")
     ap.add_argument("--model", default="gpt-4o")
     ap.add_argument("--retries", type=int, default=2)
     a = ap.parse_args()
     idea_dir = osp.abspath(a.idea_dir)
+    if a.phase == "translate":  # 日本語版だけを作り直す(英語の論文ができている実行に)
+        return translate_ja(idea_dir, a.model)
     return writeup(idea_dir, a.model, a.retries) if a.phase == "writeup" else review(idea_dir, a.model)
 
 

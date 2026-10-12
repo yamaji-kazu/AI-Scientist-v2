@@ -139,6 +139,9 @@ def compile_latex(cwd, pdf_file, timeout=30):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # NII RDC: pdflatex はログの行をバイト数で折るので、和文字が途中で切れて UTF-8 として
+                # 読めず、PDF ができても例外で落ちていた(2026-10-12、日本語版で実測)
+                errors="replace",
                 timeout=timeout,
             )
             print("Standard Output:\n", result.stdout)
@@ -158,6 +161,9 @@ def compile_latex(cwd, pdf_file, timeout=30):
 
     try:
         shutil.move(osp.join(cwd, "template.pdf"), pdf_file)
+        # NII RDC: 組んだ版の LaTeX を PDF の隣に残す。推敲の途中の版が論文に採られることがあり、
+        # 最後の版(latex/template.tex)からは、採った版を日本語に訳せないため(2026-10-12)
+        shutil.copyfile(osp.join(cwd, "template.tex"), osp.splitext(pdf_file)[0] + ".tex")
     except FileNotFoundError:
         print("Failed to rename PDF.")
         print("EXCEPTION in compile_latex while moving PDF:")
