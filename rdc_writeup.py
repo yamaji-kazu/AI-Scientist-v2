@@ -273,6 +273,171 @@ def fact_check(idea_dir: str, paper_text: str, client, model: str) -> dict:
     return j
 
 
+# ─────────────────────── 自己査読を題材の分野に合わせる ───────────────────────
+# AI-Scientist の査読は NeurIPS の書式と機械学習の論文の査読例で、ICLR の査読として行う。機械学習で
+# ない題材は書き方に関わらず「範囲外」で落ち、点数と判定が意味を持たなかった(run-41bc6352: 認知症
+# リハビリの RCT の検出力分析で、Weaknesses の大半が「機械学習の範囲外」)。題材から分野を選び、
+# その分野の査読の観点で行う(2026-10-12)。出力の項目と尺度(Overall 1–10、Decision など)は
+# 変えないので、実行器・DG・書き直しはそのまま動く。機械学習は今までどおりの書式と査読例を使う。
+FIELD_FILE = "rdc_review_field.json"
+REVIEW_FIELDS = {
+    "machine_learning": {
+        "ja": "機械学習・AI", "en": "Machine learning / AI",
+        "scope": "new machine learning or AI methods, models, training or evaluation",
+    },
+    "health_medicine": {
+        "ja": "医学・保健・看護・リハビリテーション", "en": "Health, medicine, nursing and rehabilitation",
+        "scope": "clinical research, public health, epidemiology, nursing, rehabilitation, care and trial design",
+        "venue": "a peer-reviewed journal in clinical medicine and health sciences",
+        "criteria": [
+            "Is the study design appropriate to the question, and is it reported according to the relevant guideline "
+            "(CONSORT for randomized trials, SPIRIT for trial protocols, STROBE for observational studies, PRISMA for reviews)?",
+            "Are the sample size and statistical power justified, with the assumptions (effect size, variance, attrition) stated and sourced?",
+            "Are the outcome measures valid, reliable and clinically meaningful (e.g. minimal clinically important difference)?",
+            "Are bias, confounding, randomization, blinding and missing data handled and discussed?",
+            "Are ethics, consent and data protection addressed?",
+            "Is clinical significance distinguished from statistical significance, and is generalizability discussed?",
+        ],
+    },
+    "social_sciences": {
+        "ja": "社会科学(教育・経済・政策・心理)", "en": "Social sciences (education, economics, policy, psychology)",
+        "scope": "sociology, education, economics, political science, policy, psychology, survey and qualitative research",
+        "venue": "a peer-reviewed journal in the social sciences",
+        "criteria": [
+            "Is the research question grounded in theory and prior literature?",
+            "Are concepts operationalized and measured validly and reliably?",
+            "Is the sampling appropriate, and are its limits for inference stated?",
+            "Is the causal claim, if any, supported by an appropriate identification strategy?",
+            "For qualitative work: are the methods transparent and the interpretation credible?",
+            "Are ethics, consent and the protection of participants addressed?",
+        ],
+    },
+    "natural_sciences": {
+        "ja": "自然科学(物理・化学・生物・地球)", "en": "Natural sciences (physics, chemistry, biology, earth)",
+        "scope": "physics, chemistry, biology, earth and environmental sciences, laboratory or field experiments",
+        "venue": "a peer-reviewed journal in the natural sciences",
+        "criteria": [
+            "Is the experimental or observational design sound, with appropriate controls and replicates?",
+            "Are measurement uncertainties quantified and propagated?",
+            "Are the results consistent with established theory, or is any discrepancy explained?",
+            "Are the methods described well enough to reproduce the work?",
+            "Are the conclusions proportionate to the evidence?",
+        ],
+    },
+    "statistics_methodology": {
+        "ja": "統計学・方法論", "en": "Statistics and methodology",
+        "scope": "statistical methods, simulation studies, methodology for study design or data analysis",
+        "venue": "a peer-reviewed journal in statistics or research methodology",
+        "criteria": [
+            "Are the assumptions of the methods stated and checked?",
+            "For simulation studies: are the aims, data-generating mechanisms, estimands, methods and performance measures "
+            "(ADEMP) clearly specified, and is the Monte Carlo error reported?",
+            "Is the method compared with appropriate existing methods?",
+            "Are the results reproducible (code, seeds, software versions)?",
+            "Are the practical implications and the limits of the method stated?",
+        ],
+    },
+    "humanities": {
+        "ja": "人文学", "en": "Humanities",
+        "scope": "history, literature, philosophy, linguistics, cultural studies",
+        "venue": "a peer-reviewed journal in the humanities",
+        "criteria": [
+            "Are the sources and materials appropriate and properly cited?",
+            "Is the argument coherent, and are interpretations supported by the sources?",
+            "Is the work positioned within the existing scholarship?",
+            "Are the limits of the interpretation acknowledged?",
+        ],
+    },
+    "general": {
+        "ja": "分野を問わない一般の観点", "en": "General (field-independent)",
+        "scope": "anything that does not fit the other fields",
+        "venue": "a peer-reviewed scholarly journal in the paper's own field",
+        "criteria": [
+            "Is the research question clear and worth asking in its field?",
+            "Are the methods appropriate to the question and described well enough to reproduce?",
+            "Are the claims supported by the evidence presented?",
+            "Are the limitations stated honestly?",
+        ],
+    },
+}
+
+
+def _field_form(key: str) -> tuple[str, str, int]:
+    """分野の査読の(system prompt, 書式, 査読例の数)。出力の項目と尺度は上流の template_instructions のまま。"""
+    from ai_scientist.perform_llm_review import neurips_form, reviewer_system_prompt_neg, template_instructions
+    if key == "machine_learning":
+        return reviewer_system_prompt_neg, neurips_form, 1
+    f = REVIEW_FIELDS.get(key) or REVIEW_FIELDS["general"]
+    system = (f"You are an expert reviewer for {f['venue']}. Review the paper by the standards of its own field "
+              f"({f['en']}), not by the standards of machine learning. Be critical and cautious in your decision. "
+              "If a paper is bad or you are unsure, give it bad scores and reject it.")
+    criteria = "\n".join(f"  - {c}" for c in f["criteria"])
+    form = f"""
+## Review Form
+You are reviewing a paper for {f['venue']}. Judge it by the standards of this field ({f['en']}).
+Do not judge whether the paper belongs to machine learning; that is not a criterion here.
+
+1. Summary: Briefly summarize the paper and its contributions.
+  - Strengths and Weaknesses: assess the paper on the following field-specific points:
+{criteria}
+  - Originality, Quality, Clarity and Significance, as understood in this field.
+2. Questions: questions for the authors whose answers could change your opinion.
+3. Limitations: have the authors addressed the limitations and potential negative impact of their work?
+4. Ethical concerns: flag the paper if there are ethical issues.
+5. Soundness (1-4): are the methods appropriate and the central claims supported by evidence? 4 excellent, 3 good, 2 fair, 1 poor.
+6. Presentation (1-4): clarity of writing and contextualization relative to prior work in the field.
+7. Contribution (1-4): importance of the question and value of the results to the field.
+8. Overall (1-10): 10 exceptional, 8 strong accept, 7 accept, 6 weak accept, 5 borderline accept, 4 borderline reject,
+   3 reject, 2 strong reject, 1 very strong reject — judged as a submission to {f['venue']}.
+9. Confidence (1-5): how certain you are of your assessment.
+""" + template_instructions
+    return system, form, 0  # 機械学習の論文の査読例は、ほかの分野では外す
+
+
+def review_field(idea_dir: str, client, model: str) -> dict:
+    """題材(idea)から査読の分野を選ぶ。一度選んだら rdc_review_field.json に残し、書き直しの後の査読でも同じ分野にする。
+    環境変数 RDC_REVIEW_FIELD で決め打ちもできる。選べなかったとき・一覧に無い答えは general にする。"""
+    path = osp.join(idea_dir, FIELD_FILE)
+    if osp.exists(path):
+        try:
+            got = json.load(open(path))
+            if got.get("key") in REVIEW_FIELDS:
+                return got
+        except Exception:  # noqa: BLE001
+            pass
+    forced = os.environ.get("RDC_REVIEW_FIELD", "").strip()
+    if forced in REVIEW_FIELDS:
+        got = {"key": forced, "source": "env", "reason": "RDC_REVIEW_FIELD"}
+    else:
+        try:
+            idea = json.load(open(osp.join(idea_dir, "idea.json")))
+            idea = idea[0] if isinstance(idea, list) else idea
+        except Exception:  # noqa: BLE001
+            idea = {}
+        topic = "\n".join(f"{k}: {idea.get(k)}" for k in ("Title", "Short Hypothesis", "Abstract") if idea.get(k))[:4000]
+        choices = "\n".join(f"- {k}: {v['scope']}" for k, v in REVIEW_FIELDS.items())
+        from ai_scientist.llm import extract_json_between_markers, get_response_from_llm
+        got = {"key": "general", "source": "fallback", "reason": "題材を読めなかった"}
+        if topic:
+            try:
+                out, _ = get_response_from_llm(
+                    prompt=(f"Which research field should review this paper? Choose exactly one key.\n\n{choices}\n\n"
+                            f"PAPER TOPIC:\n{topic}\n\n"
+                            'Answer in JSON between ```json and ```: {"field": "<key>", "reason": "<one sentence>"}'),
+                    client=client, model=model, system_message="You classify research papers by field.",
+                    temperature=0.0)
+                j = extract_json_between_markers(out) or {}
+                if j.get("field") in REVIEW_FIELDS:
+                    got = {"key": j["field"], "source": "llm", "reason": str(j.get("reason") or "")[:300]}
+                else:
+                    got = {"key": "general", "source": "fallback", "reason": f"一覧に無い答え: {str(j.get('field'))[:60]}"}
+            except Exception as e:  # noqa: BLE001
+                got = {"key": "general", "source": "fallback", "reason": f"分野を選べなかった: {type(e).__name__}"}
+    got["ja"], got["en"] = REVIEW_FIELDS[got["key"]]["ja"], REVIEW_FIELDS[got["key"]]["en"]
+    json.dump(got, open(path, "w"), ensure_ascii=False, indent=2)
+    return got
+
+
 def review(idea_dir: str, model: str) -> int:
     pdf = osp.join(idea_dir, PAPER)
     if not osp.exists(pdf):
@@ -285,7 +450,12 @@ def review(idea_dir: str, model: str) -> int:
     try:
         client, client_model = create_client(model)
         text = load_paper(pdf)
-        rv = perform_review(text, client_model, client, num_reflections=1, num_fs_examples=1)
+        field = review_field(idea_dir, client, client_model)
+        status(idea_dir, "review", "running", f"論文を読んで査読しています({field['ja']}の観点)",
+               pdf=osp.basename(pdf), field=field)
+        system, form, n_fs = _field_form(field["key"])
+        rv = perform_review(text, client_model, client, num_reflections=1, num_fs_examples=n_fs,
+                            reviewer_system_prompt=system, review_instruction_form=form)
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         status(idea_dir, "review", "failed", f"査読できませんでした: {e}"[:300])
@@ -305,7 +475,7 @@ def review(idea_dir: str, model: str) -> int:
         figs = "done"
     except Exception as e:  # noqa: BLE001 画像を読めないモデルでは落ちる。本文の査読は済んでいる
         figs = f"skipped: {type(e).__name__}"
-    status(idea_dir, "review", "running", "論文を実験の記録と照らし合わせています")
+    status(idea_dir, "review", "running", "論文を実験の記録と照らし合わせています", field=field)
     try:
         check = fact_check(idea_dir, text, client, client_model)
     except Exception as e:  # noqa: BLE001
@@ -318,7 +488,7 @@ def review(idea_dir: str, model: str) -> int:
     def n(key):
         v = check.get(key) if isinstance(check, dict) else None
         return len(v) if isinstance(v, list) else None
-    status(idea_dir, "review", "done", "査読を終えました", pdf=PAPER, scores=keep,
+    status(idea_dir, "review", "done", "査読を終えました", pdf=PAPER, scores=keep, field=field,
            figure_review=figs, fact_check={
                "consistent": check.get("consistent") if isinstance(check, dict) else None,
                "contradicted": n("contradicted"), "unverifiable": n("unverifiable"),
