@@ -641,9 +641,180 @@ def translate_ja(idea_dir: str, model: str) -> int:
         return 1
 
 
+# ─────────────────────── 論文の書き直し(自己査読の差し戻し) ───────────────────────
+# 自己査読で、実験の記録と食い違う主張が見つかったら、その一覧を渡して論文を書き直す(2026-10-12)。
+# 実行器が「書き直し → 査読し直し」を上限まで回し、食い違いが減らなければ restore で元に戻す。
+# 差し戻しの判定に査読の判定(Accept/Reject)を使わないのは、査読が ICLR(機械学習)の査読として
+# 書かれていて、機械学習でない題材は書き方に関わらず「範囲外」で落とすため(run-41bc6352 の
+# Weaknesses の大半がそれだった)。書き直しで直せるのは、記録との食い違いと裏付けの無い主張である。
+ROUNDS_DIR = "rdc_rounds"
+_ROUND_FILES = (PAPER, PAPER_JA, "review_text.txt", "review_fact_check.json")
+
+_REVISE_PROMPT = """You wrote the LaTeX paper below from an experiment. A fact check against the experiment
+records found problems. Revise the paper so that every claim is supported by the records.
+
+Rules:
+- For each CONTRADICTED claim: correct it to match the records, or remove it.
+- For each UNVERIFIABLE claim: remove it, or state plainly that it was not tested.
+- Do not add any new number, dataset, method or result that is not in the records.
+- Keep the figures (\\includegraphics), citations and the filecontents bibliography as they are,
+  unless a claim using them must be removed.
+- Reviewer weaknesses about the writing may also be addressed. Ignore comments about the venue's scope.
+- Output the whole revised paper in one ```latex ... ``` block.
+
+CONTRADICTED (claim / evidence from the records):
+{contradicted}
+
+UNVERIFIABLE:
+{unverifiable}
+
+REVIEWER WEAKNESSES:
+{weaknesses}
+
+EXPERIMENT RECORDS (summaries):
+{records}
+
+CURRENT PAPER:
+```latex
+{paper}
+```"""
+
+
+def _merge_phase(idea_dir: str, phase: str, **fields) -> None:
+    """rdc_phase.json の段の値に、項目を足す(ほかの項目は残す)。"""
+    path = osp.join(idea_dir, "rdc_phase.json")
+    cur = json.load(open(path))
+    cur.setdefault(phase, {}).update(fields)
+    with open(path + ".tmp", "w") as f:
+        json.dump(cur, f, ensure_ascii=False, indent=2)
+    os.replace(path + ".tmp", path)
+
+
+def _experiment_records(idea_dir: str) -> str:
+    rec = {}
+    try:
+        ld = logs_dir(idea_dir)
+    except Exception:  # noqa: BLE001
+        return "{}"
+    for n in ("baseline_summary", "research_summary", "ablation_summary"):
+        try:
+            rec[n] = json.load(open(osp.join(ld, f"{n}.json")))
+        except Exception:  # noqa: BLE001
+            pass
+    return json.dumps(rec, ensure_ascii=False)[:30000]
+
+
+def revise(idea_dir: str, model: str) -> int:
+    """自己査読の食い違いを渡して論文を書き直し、rdc_paper.pdf(と日本語版)を差し替える。
+    差し替える前の論文と査読は rdc_rounds/before_r<n>/ に残す(restore で戻せるように)。"""
+    phases = json.load(open(osp.join(idea_dir, "rdc_phase.json")))
+    n = int((phases.get("revision") or {}).get("round") or 0) + 1
+    status(idea_dir, "revision", "running", f"自己査読の指摘で論文を書き直しています({n} 回目)", round=n)
+    try:
+        wu = phases.get("writeup") or {}
+        chosen = wu.get("chosen") or ""
+        src = osp.join(idea_dir, osp.splitext(chosen)[0] + ".tex") if chosen else ""
+        if not (src and osp.exists(src)):
+            raise RuntimeError("論文として採った版の LaTeX が残っていないので、書き直せません")
+        fc = json.load(open(osp.join(idea_dir, "review_fact_check.json")))
+        if not isinstance(fc.get("contradicted"), list):
+            raise RuntimeError("実験の記録との照合の結果がありません")
+        try:
+            weak = json.load(open(osp.join(idea_dir, "review_text.txt"))).get("Weaknesses") or []
+        except Exception:  # noqa: BLE001
+            weak = []
+
+        # 差し替える前の論文・査読・段の値を残す
+        keep = osp.join(idea_dir, ROUNDS_DIR, f"before_r{n}")
+        os.makedirs(keep, exist_ok=True)
+        for f in _ROUND_FILES:
+            if osp.exists(osp.join(idea_dir, f)):
+                shutil.copyfile(osp.join(idea_dir, f), osp.join(keep, f))
+        json.dump({k: phases.get(k) for k in ("writeup", "review")},
+                  open(osp.join(keep, "phases.json"), "w"), ensure_ascii=False, indent=2)
+
+        from ai_scientist.llm import create_client, get_response_from_llm
+        from ai_scientist.perform_icbinb_writeup import WRITEUP_MAX_TOKENS, compile_latex
+        def lines(items, keys):
+            return "\n".join("- " + " / ".join(str(i.get(k, "")) for k in keys) if isinstance(i, dict) else f"- {i}"
+                             for i in items) or "(none)"
+        prompt = _REVISE_PROMPT.format(
+            contradicted=lines(fc["contradicted"], ("claim", "evidence")),
+            unverifiable=lines(fc.get("unverifiable") or [], ("claim",)),
+            weaknesses=lines(weak, ()), records=_experiment_records(idea_dir),
+            paper=open(src, encoding="utf-8").read())
+        client, client_model = create_client(model)
+        resp, _ = get_response_from_llm(prompt=prompt, client=client, model=client_model,
+                                        system_message="You are a careful scientist revising your own paper. "
+                                                       "Never invent results.",
+                                        temperature=0.3, max_tokens=WRITEUP_MAX_TOKENS)
+        m = re.search(r"```latex(.*?)```", resp, re.DOTALL)
+        if not m or "\\begin{document}" not in m.group(1):
+            import ai_scientist.llm as llm_module
+            raise RuntimeError("書き直した論文に LaTeX の全文がありません"
+                               f"(終わり方: {llm_module.LAST_FINISH_REASON})")
+        latex = osp.join(idea_dir, "latex")
+        with open(osp.join(latex, "template.tex"), "w", encoding="utf-8") as f:
+            f.write(m.group(1).strip())
+        name = f"rdc_revision{n}.pdf"
+        out = osp.join(idea_dir, name)
+        if osp.exists(out):
+            os.remove(out)
+        compile_latex(latex, out, timeout=120)
+        if not osp.exists(out):
+            raise RuntimeError("書き直した論文を PDF に組めませんでした")
+        score = grounding(pdf_text(out), idea_terms(idea_dir))
+        if score < 0.5:
+            raise RuntimeError(f"書き直した論文が題材から外れました(題材の語の一致 {round(score * 100)}%)")
+        shutil.copyfile(out, osp.join(idea_dir, PAPER))
+        _merge_phase(idea_dir, "writeup", chosen=name, grounding=score, revision=n,
+                     cited=cited_in(osp.join(idea_dir, PAPER), idea_dir))
+        # 日本語版は、書き直した英語の論文から作り直す(古い訳を残さない)
+        if osp.exists(osp.join(idea_dir, PAPER_JA)):
+            os.remove(osp.join(idea_dir, PAPER_JA))
+        translate_ja(idea_dir, model)
+        status(idea_dir, "revision", "done", f"論文を書き直しました({n} 回目)", round=n,
+               addressed={"contradicted": len(fc["contradicted"]), "unverifiable": len(fc.get("unverifiable") or [])})
+        return 0
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        status(idea_dir, "revision", "failed", f"論文を書き直せませんでした: {e}"[:300], round=n)
+        return 1
+
+
+def restore(idea_dir: str) -> int:
+    """直前の書き直しを取り消し、書き直す前の論文・日本語版・査読・段の値に戻す。"""
+    phases = json.load(open(osp.join(idea_dir, "rdc_phase.json")))
+    n = int((phases.get("revision") or {}).get("round") or 0)
+    keep = osp.join(idea_dir, ROUNDS_DIR, f"before_r{n}")
+    if n < 1 or not osp.isdir(keep):
+        status(idea_dir, "revision", "failed", "戻す先(書き直す前の論文)がありません", round=n)
+        return 1
+    for f in _ROUND_FILES:
+        src, dst = osp.join(keep, f), osp.join(idea_dir, f)
+        if osp.exists(src):
+            shutil.copyfile(src, dst)
+        elif osp.exists(dst):
+            os.remove(dst)  # 書き直す前に無かったもの(日本語版など)は消す
+    saved = json.load(open(osp.join(keep, "phases.json")))
+    path = osp.join(idea_dir, "rdc_phase.json")
+    cur = json.load(open(path))
+    for k, v in saved.items():
+        if v is not None:
+            cur[k] = v
+    cur["revision"] = {**(cur.get("revision") or {}), "state": "restored", "round": n,
+                       "step": f"書き直し({n} 回目)を取り消し、書き直す前の論文に戻しました",
+                       "updated": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    with open(path + ".tmp", "w") as f:
+        json.dump(cur, f, ensure_ascii=False, indent=2)
+    os.replace(path + ".tmp", path)
+    print(f"[rdc] revision: restored — round {n}", flush=True)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["writeup", "review", "translate"])
+    ap.add_argument("phase", choices=["writeup", "review", "translate", "revise", "restore"])
     ap.add_argument("idea_dir")
     ap.add_argument("--model", default="gpt-4o")
     ap.add_argument("--retries", type=int, default=2)
@@ -651,6 +822,10 @@ def main() -> int:
     idea_dir = osp.abspath(a.idea_dir)
     if a.phase == "translate":  # 日本語版だけを作り直す(英語の論文ができている実行に)
         return translate_ja(idea_dir, a.model)
+    if a.phase == "revise":  # 自己査読の食い違いを渡して論文を書き直す(回数は rdc_phase.json の revision.round)
+        return revise(idea_dir, a.model)
+    if a.phase == "restore":  # 直前の書き直しを取り消す
+        return restore(idea_dir)
     return writeup(idea_dir, a.model, a.retries) if a.phase == "writeup" else review(idea_dir, a.model)
 
 
