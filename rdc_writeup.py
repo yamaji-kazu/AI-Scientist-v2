@@ -619,6 +619,44 @@ _HANGUL_PARTICLES = {"들이": "たちが", "들은": "たちは", "들을": "�
 _HANGUL_RUN = re.compile(r"(?<=[\u3040-\u30ff\u4e00-\u9fff])([\uac00-\ud7af]{1,3})")
 
 
+# 2026-10-13: 中国語の簡体字(Qwen3-Coder が Rehabilitation を「康复」と訳した。run-c008e3ee、3 回とも同じ)。
+# 言葉で直せるものは言葉で(康复→リハビリテーション。字だけ直すと「康復」という日本語に無い語になる)、
+# 残りは字を日本の字体に直す。読み込むときに「元が日本語の文字集合に無く、置き換え先は有る」組だけ残す
+# (表の書き誤りで、正しい日本語を壊さないため)
+_ZH_WORDS = {"康复": "リハビリテーション", "恢复": "回復", "反复": "反復", "重复": "重複", "复杂": "複雑",
+             "复制": "複製", "复合": "複合", "复数": "複数", "答复": "回答", "复习": "復習", "数据": "データ",
+             "数据集": "データセット", "随机": "無作為", "样本": "標本", "显著": "有意", "检验": "検定"}
+_ZH_CHARS = dict(zip(
+    "复测试验实现发结论设计统证评价预应对观关认识疗护组显样变归机时间长动运练训质问题习脑记忆诊线图级层处务产类选择执构规则标准确误异优势效响贡讨议总广际东华养营资经济历纳输获达进过阶头齐单两个这们为与种队员议边见视觉读写说话语词连续维护项详细缓减轻负担荷亲属伙伴协调参与资质据检随区医药剂量饮食睡眠障碍认知功能痴呆症状严重程度变化趋势显示统计数据收集样本",
+    "復測試験実現発結論設計統証評価予応対観関認識療護組顕様変帰機時間長動運練訓質問題習脳記憶診線図級層処務産類選択執構規則標準確誤異優勢効響貢討議総広際東華養営資経済歴納輸獲達進過階頭斉単両個這們為与種隊員議辺見視覚読写説話語詞連続維護項詳細緩減軽負担荷親属伙伴協調参与資質据検随区医薬剤量飲食睡眠障碍認知功能痴呆症状厳重程度変化趨勢顕示統計数据収集様本"))
+_ZH_CHARS = {k: v for k, v in _ZH_CHARS.items() if k != v and not _in_jis(k) and _in_jis(v)}
+_ZH_WORDS = {k: v for k, v in _ZH_WORDS.items() if any(not _in_jis(c) for c in k) and all(_in_jis(c) for c in v)}
+
+
+def _repair_zh(ja: str) -> tuple[str, list[str]]:
+    """簡体字を、言葉の表(長いものから)、次に字の表で日本語に直す。置き換えた記録を返す。"""
+    notes: list[str] = []
+    for w in sorted(_ZH_WORDS, key=len, reverse=True):
+        if w in ja:
+            notes.append(f"{w}→{_ZH_WORDS[w]}")
+            ja = ja.replace(w, _ZH_WORDS[w])
+    out = []
+    for ch in ja:
+        if ch in _ZH_CHARS:
+            notes.append(f"{ch}→{_ZH_CHARS[ch]}")
+            out.append(_ZH_CHARS[ch])
+        else:
+            out.append(ch)
+    return "".join(out), notes
+
+
+def _repair_foreign(ja: str) -> tuple[str, list[str]]:
+    """日本語の文字集合に無い文字の修復: ハングルの助詞と、中国語の簡体字。"""
+    ja, a = _repair_hangul(ja)
+    ja, b = _repair_zh(ja)
+    return ja, a + b
+
+
 def _repair_hangul(ja: str) -> tuple[str, list[str]]:
     """日本語の直後の短いハングル(助詞)を表で置き換える。置き換えた記録を返す。"""
     notes: list[str] = []
@@ -681,7 +719,7 @@ def _translate_piece(text: str, client, model: str) -> tuple[str | None, list[st
         if not problems:
             return ja, [], []
         if all(p.startswith("日本語の文字集合に無い文字") for p in problems):
-            fixed, notes = _repair_hangul(ja)
+            fixed, notes = _repair_foreign(ja)
             if notes and not _check_translation(text, fixed):
                 return fixed, [], notes
         prev = ja
