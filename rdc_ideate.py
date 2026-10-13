@@ -155,6 +155,26 @@ def slug(s: str) -> str:
     return s[:50].strip("_") or "rdc_plan_study"
 
 
+def normalize(idea: dict) -> dict:
+    """配列で返ってきた項目を、番号付きの行につないだ文字列にする。
+
+    2026-10-14: Qwen3-Coder は Experiments を 6 項目の配列で返し、中身があるのに validate が「空か短すぎます」で
+    3 回とも捨て、研究実行が題材づくりで失敗した(run-d042c12f)。前回(run-c008e3ee)はたまたま文字列で返っていた。
+    中身の無い配列は空の文字列になり、これまでどおり validate が断る
+    """
+    out = dict(idea)
+    for k in REQUIRED:
+        v = out.get(k)
+        if isinstance(v, list):
+            lines = []
+            for i, x in enumerate(v, 1):
+                text = x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
+                if text.strip():
+                    lines.append(f"{i}. {text.strip()}")
+            out[k] = "\n".join(lines)
+    return out
+
+
 def validate(idea: dict) -> str | None:
     for k in REQUIRED:
         if not isinstance(idea.get(k), str) or len(idea[k].strip()) < 20 and k != "Name":
@@ -162,6 +182,15 @@ def validate(idea: dict) -> str | None:
     if re.search(r"[぀-ヿ一-鿿]", idea["Experiments"] + idea["Title"]):
         return "題名か実験の指示に日本語が残っています(実験のコードを書くモデルが読み違えるため英語にする)"
     return None
+
+
+def keep_raw(xdir: str, attempt: int, out: str) -> None:
+    """捨てた返事を残す(なぜ捨てたかを後から確かめるため。2026-10-14 は残しておらず、もう一度問い合わせて確かめた)"""
+    try:
+        with open(osp.join(xdir, f"ideation_rejected_{attempt}.txt"), "w", encoding="utf-8") as f:
+            f.write(out or "")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def ideate(xdir: str, model: str, retries: int) -> int:
@@ -198,10 +227,13 @@ def ideate(xdir: str, model: str, retries: int) -> int:
             continue
         if not isinstance(idea, dict):
             last = "題材の JSON を読み取れませんでした"
+            keep_raw(xdir, attempt, out)
             continue
+        idea = normalize(idea)
         why = validate(idea)
         if why:
             last = why
+            keep_raw(xdir, attempt, out)
             print(f"[rdc] 題材を作り直します: {why}", flush=True)
             continue
         idea["Name"] = slug(idea["Name"])
