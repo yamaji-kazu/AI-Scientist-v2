@@ -512,6 +512,8 @@ _JA_SYSTEM = (
     "\\citep{...}, \\citet{...}, \\ref{...}, \\label{...}, \\includegraphics{...}, \\url{...} and file name "
     "exactly as given.\n"
     "- Keep every number exactly as written (do not convert, round, or spell out numbers).\n"
+    "- Also translate the titles of \\section, \\subsection and \\paragraph, and captions. Write "
+    "Figure~\\ref{...} as 図~\\ref{...} and Table~\\ref{...} as 表~\\ref{...}.\n"
     "- Do not add, remove, summarize or explain anything. Keep the same structure and order.\n"
     "- Write only in Japanese (kanji, hiragana, katakana). Never use Korean Hangul or other scripts.\n"
     "- Output only the translated fragment inside one ```latex ... ``` block."
@@ -744,6 +746,42 @@ def set_ja(idea_dir: str, **ja) -> None:
     print(f"[rdc] writeup(ja): {ja.get('state')} — {ja.get('step')}", flush=True)
 
 
+# 日本語化だけを別のモデルに任せる(2026-10-13)。run-c008e3ee の論文を Qwen3-Coder と llm-jp-4.1-8B で
+# 訳し比べたところ、Qwen は題名で 3 回とも「康复」、本文でハングルを出し、「力分析」「可行性」と訳した。
+# llm-jp は日本語でない字を出さず、「検出力分析」「ランダム化比較試験」と訳した。llm-jp の vLLM は
+# run_qwen_paper.sh が段の間だけ GPU 2 に起こす。起きていなければ執筆と同じモデルで訳し、そう書き残す
+JA_MODEL_WAIT = int(os.environ.get("RDC_JA_WAIT", "300"))
+
+
+def _ja_model(idea_dir: str, model: str, source_note: str) -> tuple[str, str]:
+    """(訳に使うモデル, 状態に足す注記) を返す。RDC_JA_MODEL が無ければ執筆と同じモデル。"""
+    want = os.environ.get("RDC_JA_MODEL", "").strip()
+    if not want or want == model:
+        return model, ""
+    if not want.startswith("llmjp/"):
+        return want, ""
+    import urllib.request
+    served = want.split("/", 1)[1]
+    url = os.environ.get("LLMJP_BASE_URL", "http://localhost:8001/v1").rstrip("/") + "/models"
+    wait = int(os.environ.get("RDC_JA_WAIT", JA_MODEL_WAIT))  # 0 = 起こしていないので待たない
+    if wait > 0:
+        set_ja(idea_dir, state="running", step=f"日本語化に使うモデル({served})の起動を待っています",
+               source=source_note)
+    deadline = time.time() + wait
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                if served in r.read().decode():
+                    return want, ""
+        except Exception:  # noqa: BLE001
+            pass
+        if time.time() >= deadline:
+            break
+        time.sleep(10)
+    print(f"[rdc] {served} が使えない(待ち {wait} 秒)ので、{model} で訳す", flush=True)
+    return model, f"{served} が使えなかったため、執筆と同じモデルで訳しました"
+
+
 def translate_ja(idea_dir: str, model: str) -> int:
     """英語の論文(rdc_paper.pdf として採った版)の LaTeX を日本語に訳し、rdc_paper_ja.pdf に組む。"""
     try:
@@ -773,6 +811,7 @@ def translate_ja(idea_dir: str, model: str) -> int:
                    step=("採った版の論文の LaTeX が残っておらず、残っている最後の版は採った版と中身が違うため"
                          f"(語の一致 {round(same * 100)}%)、日本語版を作りませんでした"))
             return 1
+    ja_model, model_note = _ja_model(idea_dir, model, source_note)
     set_ja(idea_dir, state="running", step="英語の論文を日本語に訳しています", source=source_note)
     try:
         from ai_scientist.llm import create_client
@@ -790,7 +829,7 @@ def translate_ja(idea_dir: str, model: str) -> int:
         if "\\begin{document}" not in tex_wo:
             raise RuntimeError("英語の論文の LaTeX に \\begin{document} がありません")
         pre, body = tex_wo.split("\\begin{document}", 1)
-        client, client_model = create_client(model)
+        client, client_model = create_client(ja_model)
         repaired: list[str] = []  # 日本語でない文字(ハングルの助詞・簡体字)を置き換えた記録
 
         t = pre.find("\\title{")
@@ -847,13 +886,14 @@ def translate_ja(idea_dir: str, model: str) -> int:
             raise RuntimeError(f"日本語版の PDF に日本語がほとんどありません(かな {kana} 字。和文の字形が組めていない疑い)")
         set_ja(idea_dir, state="done",
                step="日本語版を作りました" + (f"(訳に混じった日本語でない文字を置き換えた: {_repair_summary(repaired)})"
-                                          if repaired else ""),
-               repaired=repaired, pdf=PAPER_JA, source=source_note,
+                                          if repaired else "") + (f"({model_note})" if model_note else ""),
+               repaired=repaired, pdf=PAPER_JA, source=source_note, model=ja_model,
                pieces=len(pieces), kana=kana, question_marks={"en": en_unres, "ja": text.count("?")})
         return 0
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
-        set_ja(idea_dir, state="failed", step=f"日本語版を作れませんでした: {e}"[:300], source=source_note)
+        set_ja(idea_dir, state="failed", step=f"日本語版を作れませんでした: {e}"[:300], source=source_note,
+               model=ja_model)
         return 1
 
 
