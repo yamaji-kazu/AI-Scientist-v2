@@ -3,7 +3,7 @@
 #   bash ~/run_qwen_paper.sh ideate <run>            … ~/rdc-exchange/<run>/input から題材を作る
 #   bash ~/run_qwen_paper.sh <writeup|review> <dir>  … ~/ais-smoke-out の下の作業フォルダ
 # 研究実行と同じ隔離の網(ais-egress)・同じ LLM(Qwen3-Coder, 8001)。GPU は使わない。
-# 外向き通信は使わない(文献は DR の調査から実行器が渡す)。像は TeX と和文(CJK)を足した ais-exp:rdc-tex-cjk。
+# 外向き通信は使わない(文献は DR の調査から実行器が渡す)。像は TeX と和文(CJK)を足した ais-exp:rdc-tex-cjk に、日本語版を組む luatexja と原ノ味を足した ais-exp:rdc-tex-ja。
 #
 # 2026-10-13: 日本語化だけは llm-jp-4.1-8B に任せる(Qwen は簡体字・ハングルを混ぜ、用語も誤った)。
 # 日本語化を含む段(writeup・revise・translate)の間だけ、空いている GPU 2 に llm-jp の vLLM(8002)と
@@ -73,7 +73,7 @@ sudo docker run --rm --name ais-paper --network ais-egress \
   -e no_proxy=172.30.0.1,localhost,127.0.0.1 -e NO_PROXY=172.30.0.1,localhost,127.0.0.1 \
   -e OPENAI_BASE_URL=http://172.30.0.1:8001/v1 -e OPENAI_API_KEY=EMPTY -e LLMJP_TIMEOUT=1800 \
   $JA_ENV $MOUNT \
-  ais-exp:rdc-tex-cjk \
+  ais-exp:rdc-tex-ja \
   bash -c "cd /ais && timeout 10800 $CMD"
 rc=$?
 ja_stop

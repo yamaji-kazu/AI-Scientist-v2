@@ -503,6 +503,24 @@ def review(idea_dir: str, model: str) -> int:
 # しないよう、節ごとに機械で照らし、合わなければ 1 度だけ訳し直す。それでも合わなければ日本語版は
 # 出さず、理由を残す(英語の論文は完了のまま)。
 PAPER_JA = "rdc_paper_ja.pdf"
+
+# 日本語版は lualatex + luatexja で組む(2026-10-14)。それまでの pdflatex + CJKutf8 は、使える和文の字形が
+# 和田研明朝しか無く字形にむらがあり、和欧間の空きや禁則も組まなかった(run-30a1f12c の日本語版で確かめた)。
+# 和文の字形は luatexja の既定の原ノ味明朝・角ゴシック(texlive-lang-japanese に入っている。像は ais-exp:rdc-tex-ja)。
+# fontspec で欧文を差し替えると、像に OpenType の Times 系(TeX Gyre)が無く欧文が組めなかったので、欧文は
+# 英語版と同じ times(Nimbus)のまま、T1 で組む(lualatex の既定の TU には times の字形が無く Latin Modern になる)。
+# 図と表の見出し(Figure / Table)はクラスが出すので、訳では変わらない。ここで「図」「表」にする
+_JA_PREAMBLE = ("\\usepackage[T1]{fontenc}\n\\usepackage{luatexja}\n"
+                "\\renewcommand{\\figurename}{図}\n\\renewcommand{\\tablename}{表}\n")
+
+
+def _strip_cjk(tex: str) -> str:
+    """英語版を組むときに差し込んだ CJKutf8 の包みを外す(改行の有無に関わらず)。"""
+    tex = tex.replace("\\usepackage{CJKutf8}\n", "")
+    tex = re.sub(r"\\begin\{CJK\}\{UTF8\}\{min\}\n?", "", tex)
+    return re.sub(r"\\end\{CJK\}\n?", "", tex)
+
+
 JA_CHUNK = 6000  # 1 回に訳す LaTeX の長さ(文字)。出力の上限(WRITEUP_MAX_TOKENS)に十分収まる
 
 _JA_SYSTEM = (
@@ -824,8 +842,8 @@ def translate_ja(idea_dir: str, model: str) -> int:
             held.append(m.group(0))
             return f"%%RDC_HELD_{len(held) - 1}%%"
         tex_wo = re.sub(r"\\begin\{filecontents\*?\}.*?\\end\{filecontents\*?\}", hold, tex, flags=re.DOTALL)
-        # 英語版を組むときに足した CJK の包みは外す(日本語版を組むときに付け直す)
-        tex_wo = tex_wo.replace("\\usepackage{CJKutf8}\n", "").replace("\\begin{CJK}{UTF8}{min}\n", "").replace("\\end{CJK}\n", "")
+        # 英語版を組むときに足した CJK の包みは外す(日本語版は luatexja で組むので要らない)
+        tex_wo = _strip_cjk(tex_wo)
         if "\\begin{document}" not in tex_wo:
             raise RuntimeError("英語の論文の LaTeX に \\begin{document} がありません")
         pre, body = tex_wo.split("\\begin{document}", 1)
@@ -863,6 +881,8 @@ def translate_ja(idea_dir: str, model: str) -> int:
             raise RuntimeError(f"訳した論文の全体が英語版と合いません: {'; '.join(whole)}"[:300])
         for n, block in enumerate(held):
             ja_tex = ja_tex.replace(f"%%RDC_HELD_{n}%%", block)
+        # luatexja の前置きは照合の後に足す(英語版に無い命令と数値を照合に混ぜない)
+        ja_tex = ja_tex.replace("\\begin{document}", _JA_PREAMBLE + "\\begin{document}", 1)
 
         latex_ja = osp.join(idea_dir, "latex_ja")
         if osp.exists(latex_ja):
@@ -876,7 +896,7 @@ def translate_ja(idea_dir: str, model: str) -> int:
         out_pdf = osp.join(idea_dir, PAPER_JA)
         if osp.exists(out_pdf):
             os.remove(out_pdf)
-        compile_latex(latex_ja, out_pdf, timeout=120)
+        compile_latex(latex_ja, out_pdf, timeout=120, engine="lualatex")
         if not osp.exists(out_pdf):
             raise RuntimeError("日本語版の LaTeX を PDF に組めませんでした")
         text = pdf_text(out_pdf)
@@ -904,7 +924,9 @@ def translate_ja(idea_dir: str, model: str) -> int:
 # 書かれていて、機械学習でない題材は書き方に関わらず「範囲外」で落とすため(run-41bc6352 の
 # Weaknesses の大半がそれだった)。書き直しで直せるのは、記録との食い違いと裏付けの無い主張である。
 ROUNDS_DIR = "rdc_rounds"
-_ROUND_FILES = (PAPER, PAPER_JA, "review_text.txt", "review_fact_check.json")
+# 日本語版の LaTeX(rdc_paper_ja.tex)も残す。残していなかったので、run-30a1f12c で書き直す前の論文に戻したとき、
+# PDF は戻ったが隣の LaTeX は書き直した版の訳のままで、採った版の日本語版を組み直せなかった(2026-10-14)
+_ROUND_FILES = (PAPER, PAPER_JA, osp.splitext(PAPER_JA)[0] + ".tex", "review_text.txt", "review_fact_check.json")
 
 _REVISE_PROMPT = """You wrote the LaTeX paper below from an experiment. A fact check against the experiment
 records found problems. Revise the paper so that every claim is supported by the records.

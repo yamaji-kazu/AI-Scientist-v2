@@ -119,16 +119,19 @@ def rdc_fix_bibliography(cwd):
             f.write(fixed)
 
 
-def compile_latex(cwd, pdf_file, timeout=30):
+def compile_latex(cwd, pdf_file, timeout=30, engine="pdflatex"):
+    """NII RDC: engine="lualatex" は日本語版用(前置きに luatexja を入れた LaTeX を組む)。
+    lualatex のときは CJKutf8 を差し込まない(luatexja と一緒には使えない)。英語版は pdflatex のまま。"""
     print("GENERATING LATEX")
     rdc_fix_bibliography(cwd)
-    rdc_enable_cjk(cwd)
+    if engine == "pdflatex":
+        rdc_enable_cjk(cwd)
 
     commands = [
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
+        [engine, "-interaction=nonstopmode", "template.tex"],
         ["bibtex", "template"],
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
+        [engine, "-interaction=nonstopmode", "template.tex"],
+        [engine, "-interaction=nonstopmode", "template.tex"],
     ]
 
     for command in commands:

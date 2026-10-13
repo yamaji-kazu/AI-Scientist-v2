@@ -1,0 +1,20 @@
+# NII RDC: 日本語版の論文を lualatex + luatexja で、源ノ明朝系(Noto Serif CJK JP)の字形で組むため、
+# ais-exp:rdc-tex-cjk に texlive-lang-japanese・texlive-luatex・fonts-noto-cjk を足す(2026-10-14)。
+# 元の像は lualatex の本体はあるが、字形を読む luaotfload(texlive-luatex)が無く、luatexja が使えなかった。
+# それまでの日本語版は pdflatex + CJKutf8 で、使える和文の字形が和田研明朝(dmj*)しか無く、字形にむらがあって
+# 読みにくかった(run-30a1f12c の rdc_paper_ja.pdf を pdffonts で確かめた)。CJKutf8 は禁則や和欧間の空きも組まない。
+# jammy には原ノ味(fonts-haranoaji)が無いので、同じ源ノ明朝を元にした Noto Serif CJK JP を使う。
+# .14 は外向き通信を閉じているため、112 で同じ jammy の .deb を取り(元の像に入っている部品は除く)、照合して入れる。
+# 112 で依存を見積もるとき、元の像の libpng-dev が apt の見る版と合わず止まったので、見積もりのときだけ外した(dpkg --audit は空)。
+FROM ais-exp:rdc-tex-cjk
+COPY jadebs/ /tmp/jadebs/
+RUN cd /tmp/jadebs && sha256sum -c --quiet SHA256SUMS \
+    && export DEBIAN_FRONTEND=noninteractive \
+    && dpkg -i /tmp/jadebs/*.deb > /tmp/dpkg-ja.log 2>&1 \
+    && dpkg --configure -a \
+    && test -z "$(dpkg --audit)" \
+    && cd / && rm -rf /tmp/jadebs \
+    && kpsewhich luatexja.sty luatexja-fontspec.sty \
+    && test -f /usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc \
+    && luaotfload-tool -u > /dev/null \
+    && luaotfload-tool --find="Noto Serif CJK JP" | grep -q found
