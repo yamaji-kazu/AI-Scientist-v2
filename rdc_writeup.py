@@ -669,6 +669,13 @@ def _repair_hangul(ja: str) -> tuple[str, list[str]]:
     return _HANGUL_RUN.sub(sub, ja), notes
 
 
+def _repair_summary(notes: list[str]) -> str:
+    """置き換えの記録を「康复→リハビリテーション ×2、들이→たちが」の形にまとめる。
+    2026-10-13 まで、中国語を直したときも「韓国語の助詞を置き換えた」と出ていた(run-c008e3ee の比較で見つけた)。"""
+    from collections import Counter
+    return "、".join(n + (f" ×{c}" if c > 1 else "") for n, c in Counter(notes).items())
+
+
 def _feedback_en(en: str, ja: str) -> str:
     """照合の食い違いを、モデルに渡す英語の指示にする(日本語の状態の文とは別に作る)。"""
     a, b = _tex_facts(en), _tex_facts(ja)
@@ -784,7 +791,7 @@ def translate_ja(idea_dir: str, model: str) -> int:
             raise RuntimeError("英語の論文の LaTeX に \\begin{document} がありません")
         pre, body = tex_wo.split("\\begin{document}", 1)
         client, client_model = create_client(model)
-        repaired: list[str] = []  # ハングルの助詞を置き換えた記録
+        repaired: list[str] = []  # 日本語でない文字(ハングルの助詞・簡体字)を置き換えた記録
 
         t = pre.find("\\title{")
         if t >= 0:
@@ -839,7 +846,8 @@ def translate_ja(idea_dir: str, model: str) -> int:
         if kana < 200:
             raise RuntimeError(f"日本語版の PDF に日本語がほとんどありません(かな {kana} 字。和文の字形が組めていない疑い)")
         set_ja(idea_dir, state="done",
-               step="日本語版を作りました" + (f"(訳に混じった韓国語の助詞 {len(repaired)} か所を置き換えた)" if repaired else ""),
+               step="日本語版を作りました" + (f"(訳に混じった日本語でない文字を置き換えた: {_repair_summary(repaired)})"
+                                          if repaired else ""),
                repaired=repaired, pdf=PAPER_JA, source=source_note,
                pieces=len(pieces), kana=kana, question_marks={"en": en_unres, "ja": text.count("?")})
         return 0
