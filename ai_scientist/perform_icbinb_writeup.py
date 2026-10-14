@@ -93,6 +93,67 @@ def rdc_enable_cjk(cwd):
     return True
 
 
+_RDC_TEX_ESC = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#", "_": r"\_",
+                "{": r"\{", "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}"}
+# 著者を出す版(\iclrfinalcopy)は、見出しを「I Can't Believe It's Not Better Workshop @ ICLR 2025」にする。
+# 採択されていないので、組んだ後の見出しを Preprint に置き換える。行番号の定規も消える
+_RDC_FINAL = ("\\iclrfinalcopy % rdc-authors\n"
+              # 訳の段で目印の注釈が落ちて二重に入っても、自分自身を呼び続けないよう 1 回だけ包む
+              "\\makeatletter\\ifx\\rdc@maketitle\\undefined\\let\\rdc@maketitle\\@maketitle"
+              "\\def\\@maketitle{\\rdc@maketitle\\lhead{Preprint}}\\fi\\makeatother % rdc-authors\n")
+
+
+def _rdc_tex(t):
+    return "".join(_RDC_TEX_ESC.get(ch, ch) for ch in str(t))
+
+
+def rdc_set_authors(cwd):
+    """NII RDC: 著者欄を DMP の共同研究者にする(aifs ADR-37 §7)。
+
+    ひな形は投稿の審査用で、著者は Anonymous(2026-10-15、プレプリントの論文がそのまま匿名だった)。
+    実行器が作業フォルダに置いた rdc_authors.json(DG が研究実行の要求のときに DMP から組んだ並び。
+    表示名と所属だけ)を、組む直前の template.tex の \\author{...} に入れる。モデルが本文を書き換えても、
+    日本語版(latex_ja)でも効くよう、テンプレートではなく組むたびに入れ直す。並びが無ければ何もしない。
+    """
+    path = osp.join(cwd, "template.tex")
+    try:
+        authors = json.load(open(osp.join(osp.dirname(osp.abspath(cwd)), "rdc_authors.json"), encoding="utf-8"))
+        tex = open(path, encoding="utf-8").read()
+    except (OSError, ValueError):
+        return False
+    rows = [a for a in authors if isinstance(a, dict) and str(a.get("name") or "").strip()] if isinstance(authors, list) else []
+    if not rows or "\\begin{document}" not in tex:
+        return False
+    start = None
+    for m in re.finditer(r"\\author\s*\{", tex):
+        line = tex[tex.rfind("\n", 0, m.start()) + 1 : m.start()]
+        if not re.search(r"(?<!\\)%", line):
+            start = m
+            break
+    if start is None:
+        return False
+    depth, j = 1, start.end()
+    while j < len(tex) and depth:
+        if tex[j] == "\\":
+            j += 2
+            continue
+        depth += {"{": 1, "}": -1}.get(tex[j], 0)
+        j += 1
+    if depth:
+        return False
+    block = " \\And ".join(
+        _rdc_tex(a["name"].strip()) + (" \\\\ " + _rdc_tex(str(a["affiliation"]).strip()) if a.get("affiliation") else "")
+        for a in rows
+    )
+    tex = tex[: start.start()] + "\\author{" + block + "}" + tex[j:]
+    if "% rdc-authors" not in tex:
+        tex = tex.replace("\\begin{document}", _RDC_FINAL + "\\begin{document}", 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(tex)
+    print(f"[rdc] 著者欄に {len(rows)} 人を入れました")
+    return True
+
+
 def rdc_fix_bibliography(cwd):
     """NII RDC: 本文の filecontents の文献(references.bib)が、実際に組まれるようにする。
 
@@ -124,6 +185,8 @@ def compile_latex(cwd, pdf_file, timeout=30, engine="pdflatex"):
     lualatex のときは CJKutf8 を差し込まない(luatexja と一緒には使えない)。英語版は pdflatex のまま。"""
     print("GENERATING LATEX")
     rdc_fix_bibliography(cwd)
+    # 著者欄は和文の差し込み(rdc_enable_cjk)より前に入れる。和名の著者がいれば CJKutf8 も入る
+    rdc_set_authors(cwd)
     if engine == "pdflatex":
         rdc_enable_cjk(cwd)
 
