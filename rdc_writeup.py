@@ -54,7 +54,33 @@ def abstract_of_tex(tex: str | None) -> str | None:
     m = re.search(r"\\begin\{abstract\}(.*?)\\end\{abstract\}", tex, re.DOTALL)
     if not m:
         return None
-    t = m.group(1)
+    return latex_plain(m.group(1), 4000)
+
+
+def title_of_tex(tex: str | None) -> str | None:
+    """LaTeX の \\title{…} を平文にする(無ければ None)。投稿の題名に使う。それまで DG は計画(DMP)の題名で
+    投稿していた(2026-10-14、OJS #22 の題名が「…データ管理計画」になった。aifs ADR-35 §12)"""
+    if not tex:
+        return None
+    m = re.search(r"\\title\s*(?=\{)", tex)
+    if not m:
+        return None
+    end = _braced(tex, m.end())
+    if end < 0:
+        return None
+    t = re.sub(r"\\thanks\{[^{}]*\}", "", tex[m.end() + 1:end])
+    return latex_plain(t.replace("\\\\", " "), 500)
+
+
+def title_of_file(path: str) -> str | None:
+    try:
+        return title_of_tex(open(path, encoding="utf-8").read())
+    except OSError:
+        return None
+
+
+def latex_plain(t: str, limit: int) -> str | None:
+    """LaTeX の断片を平文にする。引用・参照・コメントは外し、書体の命令は中身だけ残す。数式($…$)は残す"""
     for esc, ch in (("\\%", "\x00P"), ("\\&", "&"), ("\\_", "_"), ("\\#", "#"), ("\\$", "\x00D")):
         t = t.replace(esc, ch)
     t = re.sub(r"%.*", "", t)  # コメント
@@ -66,7 +92,7 @@ def abstract_of_tex(tex: str | None) -> str | None:
     t = t.replace("\x00P", "%").replace("\x00D", "$")
     t = re.sub(r"\s+", " ", t).strip()
     t = re.sub(r"\s+([,.;:、。)\]])", r"\1", t)
-    return t[:4000] or None
+    return t[:limit] or None
 
 
 def abstract_of_file(path: str) -> str | None:
@@ -240,7 +266,8 @@ def writeup(idea_dir: str, model: str, retries: int) -> int:
                    grounding=score, candidates=cands, terms=idea_terms(idea_dir), attempt=attempt,
                    citations=cites, cited=cited_in(osp.join(idea_dir, PAPER), idea_dir),
                    # 採った版の LaTeX(PDF の隣に残る)の要旨。投稿に使う(aifs ADR-35 §11)
-                   abstract=abstract_of_file(osp.join(idea_dir, osp.splitext(best)[0] + ".tex")))
+                   abstract=abstract_of_file(osp.join(idea_dir, osp.splitext(best)[0] + ".tex")),
+                   title=title_of_file(osp.join(idea_dir, osp.splitext(best)[0] + ".tex")))
             # 日本語版は英語の論文の訳。失敗しても英語の論文は完了のまま(理由は writeup.ja に残る)
             translate_ja(idea_dir, model)
             return 0
@@ -945,7 +972,7 @@ def translate_ja(idea_dir: str, model: str) -> int:
                                           if repaired else "") + (f"({model_note})" if model_note else ""),
                repaired=repaired, pdf=PAPER_JA, source=source_note, model=ja_model,
                pieces=len(pieces), kana=kana, question_marks={"en": en_unres, "ja": text.count("?")},
-               abstract=abstract_of_tex(ja_tex))
+               abstract=abstract_of_tex(ja_tex), title=title_of_tex(ja_tex))
         return 0
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
@@ -1083,7 +1110,7 @@ def revise(idea_dir: str, model: str) -> int:
             raise RuntimeError(f"書き直した論文が題材から外れました(題材の語の一致 {round(score * 100)}%)")
         shutil.copyfile(out, osp.join(idea_dir, PAPER))
         _merge_phase(idea_dir, "writeup", chosen=name, grounding=score, revision=n,
-                     abstract=abstract_of_tex(m.group(1)),
+                     abstract=abstract_of_tex(m.group(1)), title=title_of_tex(m.group(1)),
                      cited=cited_in(osp.join(idea_dir, PAPER), idea_dir))
         # 日本語版は、書き直した英語の論文から作り直す(古い訳を残さない)
         if osp.exists(osp.join(idea_dir, PAPER_JA)):
