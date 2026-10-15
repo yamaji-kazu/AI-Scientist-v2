@@ -107,13 +107,16 @@ def _rdc_tex(t):
     return "".join(_RDC_TEX_ESC.get(ch, ch) for ch in str(t))
 
 
-def rdc_set_authors(cwd):
+def rdc_set_authors(cwd, lang="en"):
     """NII RDC: 著者欄を DMP の共同研究者にする(aifs ADR-37 §7)。
 
     ひな形は投稿の審査用で、著者は Anonymous(2026-10-15、プレプリントの論文がそのまま匿名だった)。
     実行器が作業フォルダに置いた rdc_authors.json(DG が研究実行の要求のときに DMP から組んだ並び。
     表示名と所属だけ)を、組む直前の template.tex の \\author{...} に入れる。モデルが本文を書き換えても、
     日本語版(latex_ja)でも効くよう、テンプレートではなく組むたびに入れ直す。並びが無ければ何もしない。
+
+    表記は版の言語で選ぶ(2026-10-15、英語の論文に日本語の名前が、日本語の論文に本人のローマ字の名前が入った)。
+    lang="ja" は name・affiliation、"en" は name_en・affiliation_en(無ければ name・affiliation)。
     """
     path = osp.join(cwd, "template.tex")
     try:
@@ -121,7 +124,13 @@ def rdc_set_authors(cwd):
         tex = open(path, encoding="utf-8").read()
     except (OSError, ValueError):
         return False
-    rows = [a for a in authors if isinstance(a, dict) and str(a.get("name") or "").strip()] if isinstance(authors, list) else []
+    def pick(a, key):
+        v = a.get(key + "_en") if lang == "en" else None
+        return str(v).strip() if isinstance(v, str) and v.strip() else str(a.get(key) or "").strip()
+
+    rows = [{"name": pick(a, "name"), "affiliation": pick(a, "affiliation")}
+            for a in (authors if isinstance(authors, list) else []) if isinstance(a, dict)]
+    rows = [a for a in rows if a["name"]]
     if not rows or "\\begin{document}" not in tex:
         return False
     start = None
@@ -142,7 +151,7 @@ def rdc_set_authors(cwd):
     if depth:
         return False
     block = " \\And ".join(
-        _rdc_tex(a["name"].strip()) + (" \\\\ " + _rdc_tex(str(a["affiliation"]).strip()) if a.get("affiliation") else "")
+        _rdc_tex(a["name"]) + (" \\\\ " + _rdc_tex(a["affiliation"]) if a["affiliation"] else "")
         for a in rows
     )
     tex = tex[: start.start()] + "\\author{" + block + "}" + tex[j:]
@@ -186,7 +195,7 @@ def compile_latex(cwd, pdf_file, timeout=30, engine="pdflatex"):
     print("GENERATING LATEX")
     rdc_fix_bibliography(cwd)
     # 著者欄は和文の差し込み(rdc_enable_cjk)より前に入れる。和名の著者がいれば CJKutf8 も入る
-    rdc_set_authors(cwd)
+    rdc_set_authors(cwd, "ja" if engine == "lualatex" else "en")
     if engine == "pdflatex":
         rdc_enable_cjk(cwd)
 
