@@ -28,6 +28,7 @@ sudo docker run --rm --name ais-qwen-ext --gpus '"device=2"' --network ais-egres
   -e no_proxy=172.30.0.1,localhost,127.0.0.1 -e NO_PROXY=172.30.0.1,localhost,127.0.0.1 \
   -e OPENAI_BASE_URL=http://172.30.0.1:8001/v1 -e OPENAI_API_KEY=EMPTY -e LLMJP_TIMEOUT=1800 \
   -v $IDEA_HOST:/ais/$IDEA:ro -v ~/bfts_config.qwen_easy.yaml:/ais/bfts_config.yaml -v ~/ais-smoke-out:/ais/experiments \
+  -v $HOME/AI-Scientist-v2/ai_scientist/perform_plotting.py:/ais/ai_scientist/perform_plotting.py:ro -v $HOME/AI-Scientist-v2/ai_scientist/llm.py:/ais/ai_scientist/llm.py:ro \
   ais-exp:rdc \
   bash -c "cd /ais && timeout 28800 python launch_scientist_bfts.py --load_ideas $IDEA --idea_idx 0 --skip_writeup --skip_review --model_agg_plots $M"
 echo "QWEN_EASY_EXIT=$? $(date +%H:%M:%S)"
