@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -105,6 +106,16 @@ def sanitize_code_unicode(code: str) -> str:
     return code.translate(_UNICODE_WS_FIX)
 
 
+def rdc_cut_off(text) -> bool:
+    """NII RDC: コードの囲みを開いたまま閉じていない応答(出力の上限で切れたもの)。
+
+    2026-10-14 の 2 回の実行(16:37・21:34)で、図をまとめるスクリプトが 362 行になり、上限(4096)で
+    途中の「va」「axes[0」で切れた。閉じが無いと下の取り出しは応答の全文(前置きの文ごと)を返し、
+    構文エラーで図が 0 枚のまま論文が組まれた。
+    """
+    return isinstance(text, str) and text.count("```") % 2 == 1
+
+
 def extract_code_snippet(text: str) -> str:
     """
     Look for a Python code block in triple backticks in the LLM response.
@@ -112,6 +123,9 @@ def extract_code_snippet(text: str) -> str:
     """
     # llm-jp が content なし(None)や空を返すことがあるので防御する。
     if not isinstance(text, str) or not text.strip():
+        return ""
+    # NII RDC: 切れた応答は書き出さない(前置きの文と途中までのコードを走らせない)
+    if rdc_cut_off(text):
         return ""
     pattern = r"```(?:python)?(.*?)```"
     matches = re.findall(pattern, text, flags=re.DOTALL)
@@ -155,6 +169,72 @@ def run_aggregator_script(
     return aggregator_out
 
 
+# NII RDC: 図をまとめるスクリプトだけ出力の上限を上げる(Qwen3-Coder の文脈は 65536)。
+# 振り返りの会話は切れたら始め直すので、履歴が文脈を食い尽くすことはない
+RDC_AGG_MAX_TOKENS = int(os.environ.get("RDC_AGG_MAX_TOKENS", "12000"))
+RDC_CUT_OFF_NOTE = (
+    "Your previous reply was cut off at the output limit before the closing triple backticks, "
+    "so nothing could be run. Write a complete, shorter script (at most about 250 lines): "
+    "combine related plots into subplots, use a small helper function for repeated styling, "
+    "and do not add explanations outside the code block."
+)
+
+
+def rdc_fallback_figures(base_folder, summaries, limit=MAX_FIGURES):
+    """NII RDC: まとめても図が 0 枚なら、実験の段が作った図(要約の plot_paths)を figures/ に入れる。
+
+    要約の道は実験のときの「experiments/<実行>/logs/0-qwen/...」なので、作業フォルダの logs/ 以下に
+    読み替える。実在するものだけを、要約の順に、名前が重ならないよう番号を付けて最大 limit 枚。
+    これはこの実行の実験の図そのもので、作り直したものではない。入れた枚数を返す
+    """
+    paths = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "plot_paths" and isinstance(v, list):
+                    paths.extend(x for x in v if isinstance(x, str))
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    # 研究の段(提案手法)の図を先に採る。基準・アブレーションは後
+    if isinstance(summaries, dict):
+        order = ["RESEARCH_SUMMARY", "BASELINE_SUMMARY", "ABLATION_SUMMARY"]
+        for k in order + [k for k in summaries if k not in order]:
+            walk(summaries.get(k))
+    else:
+        walk(summaries)
+    figures_dir = os.path.join(base_folder, "figures")
+    os.makedirs(figures_dir, exist_ok=True)
+    # 節ごとに同じ名前の図が出る(同じ実験のコードを使い回す)。名前でも中身でも重複を外す
+    seen, names, n = set(), set(), 0
+    for p in paths:
+        i = p.find("logs/")
+        cands = [p] if os.path.isabs(p) else []
+        if i >= 0:
+            rel = p[i:]
+            cands += [os.path.join(base_folder, rel),
+                      os.path.join(base_folder, rel.replace("logs/0-qwen/", "logs/0-run/", 1))]
+        src = next((c for c in cands if c.lower().endswith(".png") and os.path.isfile(c)), None)
+        if not src:
+            continue
+        with open(src, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        name = os.path.basename(src)
+        if digest in seen or name in names:
+            continue
+        seen.add(digest)
+        names.add(name)
+        n += 1
+        shutil.copyfile(src, os.path.join(figures_dir, f"fig{n:02d}_{os.path.basename(src)}"))
+        if n >= limit:
+            break
+    return n
+
+
 def aggregate_plots(
     base_folder: str, model: str = "o1-2024-12-17", n_reflections: int = 5
 ) -> None:
@@ -191,17 +271,34 @@ def aggregate_plots(
             system_message=AGGREGATOR_SYSTEM_MSG,
             print_debug=False,
             msg_history=msg_history,
+            max_tokens=RDC_AGG_MAX_TOKENS,
         )
     except Exception:
         traceback.print_exc()
         print("Failed to get aggregator script from LLM.")
         return
+    # NII RDC: 切れていたら、切れた応答を履歴に残さず 1 回だけ始め直す
+    if rdc_cut_off(response):
+        print("[rdc] 図をまとめるスクリプトが出力の上限で切れました。短く書き直させます")
+        try:
+            response, msg_history = get_response_from_llm(
+                prompt=aggregator_prompt + "\n\n" + RDC_CUT_OFF_NOTE,
+                client=client,
+                model=model_name,
+                system_message=AGGREGATOR_SYSTEM_MSG,
+                print_debug=False,
+                msg_history=[],
+                max_tokens=RDC_AGG_MAX_TOKENS,
+            )
+        except Exception:
+            traceback.print_exc()
 
     aggregator_code = extract_code_snippet(response)
     if not aggregator_code.strip():
         print(
             "No Python code block was found in LLM response. Full response:\n", response
         )
+        rdc_finish_figures(base_folder, exp_summaries)
         return
 
     # First run of aggregator script
@@ -247,12 +344,19 @@ If you believe you are done, simply say: "I am done". Otherwise, please provide 
                 system_message=AGGREGATOR_SYSTEM_MSG,
                 print_debug=False,
                 msg_history=msg_history,
+                max_tokens=RDC_AGG_MAX_TOKENS,
             )
 
         except Exception:
             traceback.print_exc()
             print("Failed to get reflection from LLM.")
-            return
+            break
+        # NII RDC: 切れた振り返りは履歴から外し(次の呼び出しの文脈を食わない)、短く書き直させる
+        if rdc_cut_off(reflection_response):
+            print(f"[rdc] 振り返り {i + 1} の応答が出力の上限で切れました")
+            msg_history = msg_history[:-2]
+            aggregator_out = (aggregator_out or "") + "\n\n" + RDC_CUT_OFF_NOTE
+            continue
 
         # Early-exit check
         if figure_count > 0 and "I am done" in reflection_response:
@@ -274,6 +378,18 @@ If you believe you are done, simply say: "I am done". Otherwise, please provide 
             print(
                 f"No new aggregator script was provided or it was identical. Reflection step {i+1} complete."
             )
+
+    rdc_finish_figures(base_folder, exp_summaries)
+
+
+def rdc_finish_figures(base_folder, summaries):
+    """NII RDC: 図をまとめる段の終わり。図が 0 枚なら、実験の段の図で埋める(rdc_fallback_figures)"""
+    figures_dir = os.path.join(base_folder, "figures")
+    have = [f for f in os.listdir(figures_dir) if f.lower().endswith(".png")] if os.path.isdir(figures_dir) else []
+    if have:
+        return
+    n = rdc_fallback_figures(base_folder, summaries)
+    print(f"[rdc] 図をまとめられず 0 枚でした。実験の段の図を {n} 枚入れました")
 
 
 def main():
